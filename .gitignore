@@ -1,0 +1,10 @@
+build
+mac/build
+Casks
+
+# AgentOps session artifacts
+.agents/
+
+.DS_STORE
+.idea
+firebase-debug.log
