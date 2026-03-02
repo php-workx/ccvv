@@ -1,0 +1,24 @@
+[package]
+name = "ccvv-lib"
+version = "1.1.0"
+edition = "2021"
+
+[lib]
+name = "ccvv_lib"
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+url.workspace = true
+serde_json.workspace = true
+unicode-normalization.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+toml_edit.workspace = true
+
+[build-dependencies]
+cbindgen = "0.27"

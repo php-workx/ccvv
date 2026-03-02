@@ -1,0 +1,20 @@
+[workspace]
+members = ["ccvv-lib", "ccvv-cli"]
+resolver = "2"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+url = "2"
+serde_json = "1"
+unicode-normalization = "0.1"
+thiserror = "2"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+toml_edit = "0.22"
+
+[profile.release]
+lto = true
+strip = true

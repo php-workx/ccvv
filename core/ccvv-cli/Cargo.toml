@@ -1,0 +1,13 @@
+[package]
+name = "ccvv-cli"
+version = "1.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ccvv"
+path = "src/main.rs"
+
+[dependencies]
+ccvv-lib = { path = "../ccvv-lib" }
+clap = { version = "4", features = ["derive"] }
+similar = "2"

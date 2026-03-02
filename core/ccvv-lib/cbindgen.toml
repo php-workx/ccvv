@@ -1,0 +1,14 @@
+language = "C"
+include_guard = "CCVV_BRIDGE_H"
+no_includes = true
+sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
+style = "Both"
+
+[export]
+include = []
+
+[fn]
+prefix = ""
+
+[parse]
+parse_deps = false
