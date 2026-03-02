@@ -22,5 +22,7 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>ccvv needs Accessibility access to detect your double-tap copy shortcut. Without it, you can still clean the clipboard manually from the menu bar.</string>
 </dict>
 </plist>

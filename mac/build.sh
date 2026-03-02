@@ -6,19 +6,67 @@ BUILD_DIR="build"
 TEAM_ID="4JRN737CHR"
 BUNDLE_ID="com.ccvv.app"
 NOTARIZE=0
+SKIP_RUST=0
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CORE_DIR="$SCRIPT_DIR/../core"
 
 for arg in "$@"; do
     case "$arg" in
         --notarize) NOTARIZE=1 ;;
+        --skip-rust) SKIP_RUST=1 ;;
     esac
 done
 
 mkdir -p "$BUILD_DIR"
 
-echo "Compiling..."
+# --- Step 1: Build Rust static library ---
+if [[ "$SKIP_RUST" -eq 0 ]]; then
+    echo "Building Rust core library..."
+    if ! command -v cargo &>/dev/null; then
+        echo "Error: cargo not found. Install Rust from https://rustup.rs"
+        exit 1
+    fi
+    (cd "$CORE_DIR" && cargo build --package ccvv-lib --release)
+
+    # Find the generated header
+    RUST_OUT_DIR=$(cd "$CORE_DIR" && cargo metadata --format-version 1 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['target_directory'])" 2>/dev/null \
+        || echo "$CORE_DIR/target")
+    HEADER_DIR=$(find "$RUST_OUT_DIR/release/build" -name "ccvv-bridge.h" -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)
+    LIB_PATH="$RUST_OUT_DIR/release/libccvv_lib.a"
+
+    if [[ ! -f "$LIB_PATH" ]]; then
+        echo "Error: static library not found at $LIB_PATH"
+        exit 1
+    fi
+    if [[ -z "$HEADER_DIR" ]]; then
+        echo "Error: ccvv-bridge.h not found in build output"
+        exit 1
+    fi
+
+    # Copy header to a stable location
+    cp "$HEADER_DIR/ccvv-bridge.h" "$BUILD_DIR/ccvv-bridge.h"
+    echo "  Library: $LIB_PATH"
+    echo "  Header:  $BUILD_DIR/ccvv-bridge.h"
+else
+    LIB_PATH="$CORE_DIR/target/release/libccvv_lib.a"
+    if [[ ! -f "$LIB_PATH" ]]; then
+        echo "Error: --skip-rust specified but no pre-built library found at $LIB_PATH"
+        exit 1
+    fi
+    echo "Skipping Rust build (using pre-built library)"
+fi
+
+# --- Step 2: Compile Swift with Rust library linked ---
+echo "Compiling Swift..."
 swiftc -o "$BUILD_DIR/$APP_NAME" main.swift \
     -framework Cocoa \
     -framework ApplicationServices \
+    -import-objc-header "$BUILD_DIR/ccvv-bridge.h" \
+    -L "$(dirname "$LIB_PATH")" \
+    -lccvv_lib \
+    -lsqlite3 \
     -O
 
 echo "Creating app bundle..."
@@ -37,7 +85,9 @@ if [[ -z "$SIGN_ID" ]]; then
 fi
 
 if [[ -n "$SIGN_ID" ]]; then
-    codesign --force --options runtime --sign "$SIGN_ID" "$APP_BUNDLE"
+    codesign --force --options runtime \
+        --entitlements ccvv.entitlements \
+        --sign "$SIGN_ID" "$APP_BUNDLE"
     echo "Signed with: $SIGN_ID"
 else
     codesign --force --sign - "$APP_BUNDLE"

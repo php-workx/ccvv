@@ -243,6 +243,11 @@ impl StructuralTransform {
             return None;
         }
 
+        // Skip if input already contains code fence lines (avoid double-wrapping)
+        if lines.iter().any(|l| l.trim().starts_with("```")) {
+            return None;
+        }
+
         let non_empty: Vec<&&str> = lines.iter().filter(|l| !l.is_empty()).collect();
         if non_empty.is_empty() {
             return None;

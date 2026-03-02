@@ -1,12 +1,26 @@
+[graph]
+targets = []
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib"]
-unlicensed = "deny"
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "MPL-2.0"]
+
+[[licenses.clarify]]
+name = "ccvv-lib"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+name = "ccvv-cli"
+expression = "MIT"
+license-files = []
 
 [bans]
+multiple-versions = "warn"
+wildcards = "allow"
 # No network-capable crates allowed in the dependency tree
 deny = [
     { name = "reqwest" },
