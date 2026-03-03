@@ -58,6 +58,15 @@ pub struct DomainOverride {
     pub deny: Vec<String>,
 }
 
+/// Default exclusion bundle IDs for password managers.
+pub(crate) const DEFAULT_EXCLUSION_BUNDLE_IDS: &[&str] = &[
+    "com.1password.1password",
+    "com.agilebits.onepassword7",
+    "com.lastpass.LastPass",
+    "com.bitwarden.desktop",
+    "org.keepassxc.keepassxc",
+];
+
 /// Application exclusion configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ExclusionsConfig {
@@ -73,6 +82,7 @@ pub struct ProfileOverride {
     pub whitespace_cleanup: Option<bool>,
     pub agent_strip: Option<bool>,
     pub structural_detection: Option<bool>,
+    pub table_cell_picker: Option<bool>,
     pub url_cleaning: Option<bool>,
     pub auto_wrapper: Option<bool>,
     pub user_rules: Option<bool>,
@@ -85,6 +95,44 @@ pub struct UserRuleConfig {
     pub name: String,
     pub pattern: String,
     pub replacement: String,
+}
+
+/// Double-tap detection window setting.
+/// Can be a fixed millisecond value or adaptive ("auto").
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum DoubleTapSetting {
+    Fixed(u32),
+    Adaptive(String), // "auto"
+}
+
+impl Default for DoubleTapSetting {
+    fn default() -> Self {
+        DoubleTapSetting::Fixed(450)
+    }
+}
+
+/// Em-dash replacement configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmDashConfig {
+    #[serde(default = "default_em_dash_replace")]
+    pub replace: String,
+}
+
+impl Default for EmDashConfig {
+    fn default() -> Self {
+        EmDashConfig {
+            replace: "--".to_string(),
+        }
+    }
+}
+
+fn default_em_dash_replace() -> String {
+    "--".to_string()
+}
+
+fn default_table_cell_picker_min_confidence() -> f32 {
+    0.75
 }
 
 /// Feature toggles and limits.
@@ -110,6 +158,14 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub url_cleaning: bool,
 
+    /// Enable table cell picker UI on detected tables. Default: true.
+    #[serde(default = "default_true")]
+    pub table_cell_picker: bool,
+
+    /// Minimum confidence to trigger the table cell picker. Default: 0.75.
+    #[serde(default = "default_table_cell_picker_min_confidence")]
+    pub table_cell_picker_min_confidence: f32,
+
     /// Enable auto-wrapper / backtick wrapping (Stage 7). Default: false.
     #[serde(default)]
     pub auto_wrapper: bool,
@@ -126,17 +182,17 @@ pub struct Settings {
     #[serde(default = "default_max_input_bytes")]
     pub max_input_bytes: usize,
 
-    /// Double-tap detection window in milliseconds. Default: 450.
-    #[serde(default = "default_double_tap_window_ms")]
-    pub double_tap_window_ms: u32,
+    /// Double-tap detection window. Default: Fixed(450).
+    #[serde(default)]
+    pub double_tap_window_ms: DoubleTapSetting,
 
     /// Store raw clipboard content in history. Default: false.
     #[serde(default)]
     pub history_store_raw: bool,
 
-    /// Em-dash replacement. Default: true (replace with --).
-    #[serde(default = "default_true")]
-    pub em_dash_replace: bool,
+    /// Em-dash replacement config. Default: replace with "--".
+    #[serde(default)]
+    pub em_dash: EmDashConfig,
 
     /// Strip URL scheme. Default: false.
     #[serde(default)]
@@ -151,13 +207,15 @@ impl Default for Settings {
             agent_strip: true,
             structural_detection: true,
             url_cleaning: true,
+            table_cell_picker: true,
+            table_cell_picker_min_confidence: 0.75,
             auto_wrapper: false,
             user_rules: true,
             sensitive_filter: true,
             max_input_bytes: 1_048_576,
-            double_tap_window_ms: 450,
+            double_tap_window_ms: DoubleTapSetting::default(),
             history_store_raw: false,
-            em_dash_replace: true,
+            em_dash: EmDashConfig::default(),
             url_strip_scheme: false,
         }
     }
@@ -171,6 +229,12 @@ pub struct ResolvedConfig {
     pub compiled_rules: Vec<CompiledUserRule>,
     pub url_global_deny: Vec<String>,
     pub exclusion_bundle_ids: Vec<String>,
+    /// Resolved em-dash replacement string (from EmDashConfig).
+    pub em_dash_replacement: String,
+    /// Resolved double-tap window in ms, or None for adaptive mode.
+    pub resolved_double_tap_ms: Option<u32>,
+    /// Per-domain URL parameter overrides.
+    pub url_domain_overrides: std::collections::HashMap<String, DomainOverride>,
 }
 
 impl Default for ResolvedConfig {
@@ -180,6 +244,9 @@ impl Default for ResolvedConfig {
             compiled_rules: Vec::new(),
             url_global_deny: Vec::new(),
             exclusion_bundle_ids: Vec::new(),
+            em_dash_replacement: "--".to_string(),
+            resolved_double_tap_ms: Some(450),
+            url_domain_overrides: std::collections::HashMap::new(),
         }
     }
 }
@@ -192,10 +259,11 @@ pub fn load_config(path: Option<&Path>) -> Result<CcvvConfig, CcvvError> {
     let config_path = match path {
         Some(p) => p.to_path_buf(),
         None => {
-            let home = std::env::var("HOME").map_err(|_| {
-                CcvvError::Config("HOME environment variable not set".to_string())
-            })?;
-            std::path::PathBuf::from(home).join(".ccvv").join("config.toml")
+            let home = std::env::var("HOME")
+                .map_err(|_| CcvvError::Config("HOME environment variable not set".to_string()))?;
+            std::path::PathBuf::from(home)
+                .join(".ccvv")
+                .join("config.toml")
         }
     };
 
@@ -209,9 +277,9 @@ pub fn load_config(path: Option<&Path>) -> Result<CcvvConfig, CcvvError> {
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(&config_path)?;
         let mode = metadata.mode() & 0o777;
-        if mode & 0o077 != 0 {
+        if mode != 0o600 && mode != 0o644 {
             return Err(CcvvError::ConfigIntegrity(format!(
-                "Config file {:?} has permissions {:o}, expected owner-only (0600 or 0644)",
+                "Config file {:?} has permissions {:o}, expected 0600 or 0644",
                 config_path, mode
             )));
         }
@@ -250,6 +318,9 @@ pub fn resolve_config(
                 if let Some(v) = overlay.url_cleaning {
                     settings.url_cleaning = v;
                 }
+                if let Some(v) = overlay.table_cell_picker {
+                    settings.table_cell_picker = v;
+                }
                 if let Some(v) = overlay.auto_wrapper {
                     settings.auto_wrapper = v;
                 }
@@ -280,10 +351,7 @@ pub fn resolve_config(
         }
         for rule in rules {
             let regex = Regex::new(&rule.pattern).map_err(|e| {
-                CcvvError::Config(format!(
-                    "Invalid regex in rule '{}': {}",
-                    rule.name, e
-                ))
+                CcvvError::Config(format!("Invalid regex in rule '{}': {}", rule.name, e))
             })?;
             compiled_rules.push(CompiledUserRule {
                 name: rule.name.clone(),
@@ -293,36 +361,60 @@ pub fn resolve_config(
         }
     }
 
-    // Merge URL deny lists
-    let mut url_global_deny = Vec::new();
+    // Merge URL deny lists: start with defaults, append user additions
+    let mut url_global_deny: Vec<String> = crate::transforms::url::DEFAULT_DENY_PARAMS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut url_domain_overrides = std::collections::HashMap::new();
     if let Some(url_params) = &config.url_params {
-        url_global_deny = url_params.global_deny.clone();
+        url_global_deny.extend(url_params.global_deny.iter().cloned());
+        url_domain_overrides = url_params.domains.clone();
     }
 
-    // Merge exclusions
-    let exclusion_bundle_ids = config
-        .exclusions
-        .as_ref()
-        .map(|e| e.bundle_ids.clone())
-        .unwrap_or_default();
+    // Merge exclusions: start with default password manager exclusions, append user additions
+    let mut exclusion_bundle_ids: Vec<String> = DEFAULT_EXCLUSION_BUNDLE_IDS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(exclusions) = &config.exclusions {
+        exclusion_bundle_ids.extend(exclusions.bundle_ids.iter().cloned());
+    }
 
     // Validate settings ranges
     if settings.max_input_bytes == 0 {
+        return Err(CcvvError::Config("max_input_bytes must be > 0".to_string()));
+    }
+    if !(0.0..=1.0).contains(&settings.table_cell_picker_min_confidence) {
         return Err(CcvvError::Config(
-            "max_input_bytes must be > 0".to_string(),
+            "table_cell_picker_min_confidence must be between 0.0 and 1.0".to_string(),
         ));
     }
-    if settings.double_tap_window_ms < 100 || settings.double_tap_window_ms > 2000 {
-        return Err(CcvvError::Config(
-            "double_tap_window_ms must be between 100 and 2000".to_string(),
-        ));
-    }
+
+    // Resolve double-tap window
+    let resolved_double_tap_ms = match &settings.double_tap_window_ms {
+        DoubleTapSetting::Fixed(ms) => {
+            if *ms < 100 || *ms > 2000 {
+                return Err(CcvvError::Config(
+                    "double_tap_window_ms must be between 100 and 2000".to_string(),
+                ));
+            }
+            Some(*ms)
+        }
+        DoubleTapSetting::Adaptive(_) => None,
+    };
+
+    // Resolve em-dash replacement
+    let em_dash_replacement = settings.em_dash.replace.clone();
 
     Ok(ResolvedConfig {
         settings,
         compiled_rules,
         url_global_deny,
         exclusion_bundle_ids,
+        em_dash_replacement,
+        resolved_double_tap_ms,
+        url_domain_overrides,
     })
 }
 
@@ -341,10 +433,7 @@ pub fn validate_config(config: &CcvvConfig) -> Vec<String> {
         }
         for rule in rules {
             if let Err(e) = Regex::new(&rule.pattern) {
-                errors.push(format!(
-                    "Invalid regex in rule '{}': {}",
-                    rule.name, e
-                ));
+                errors.push(format!("Invalid regex in rule '{}': {}", rule.name, e));
             }
         }
     }
@@ -353,10 +442,13 @@ pub fn validate_config(config: &CcvvConfig) -> Vec<String> {
     if config.settings.max_input_bytes == 0 {
         errors.push("max_input_bytes must be > 0".to_string());
     }
-    if config.settings.double_tap_window_ms < 100
-        || config.settings.double_tap_window_ms > 2000
-    {
-        errors.push("double_tap_window_ms must be between 100 and 2000".to_string());
+    if !(0.0..=1.0).contains(&config.settings.table_cell_picker_min_confidence) {
+        errors.push("table_cell_picker_min_confidence must be between 0.0 and 1.0".to_string());
+    }
+    if let DoubleTapSetting::Fixed(ms) = config.settings.double_tap_window_ms {
+        if !(100..=2000).contains(&ms) {
+            errors.push("double_tap_window_ms must be between 100 and 2000".to_string());
+        }
     }
 
     // Validate profile references exist
@@ -391,10 +483,6 @@ fn default_max_input_bytes() -> usize {
     1_048_576
 }
 
-fn default_double_tap_window_ms() -> u32 {
-    450
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,8 +510,34 @@ replacement = ""
 "#;
         let config: CcvvConfig = toml::from_str(toml_str).unwrap();
         assert!(config.settings.auto_wrapper);
-        assert_eq!(config.settings.double_tap_window_ms, 300);
+        assert!(matches!(
+            config.settings.double_tap_window_ms,
+            DoubleTapSetting::Fixed(300)
+        ));
         assert_eq!(config.rules.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_toml_parsing_em_dash() {
+        let toml_str = r#"
+[settings.em_dash]
+replace = "—"
+"#;
+        let config: CcvvConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.settings.em_dash.replace, "\u{2014}");
+    }
+
+    #[test]
+    fn test_toml_parsing_double_tap_auto() {
+        let toml_str = r#"
+[settings]
+double_tap_window_ms = "auto"
+"#;
+        let config: CcvvConfig = toml::from_str(toml_str).unwrap();
+        assert!(matches!(
+            config.settings.double_tap_window_ms,
+            DoubleTapSetting::Adaptive(_)
+        ));
     }
 
     #[test]
@@ -444,9 +558,25 @@ auto_wrapper = true
     fn test_resolve_invalid_profile() {
         let config = CcvvConfig::default();
         let result = resolve_config(&config, Some("nonexistent"));
-        // No profiles section → no error (profile just not found)
-        // With profiles section but wrong name → error
         assert!(result.is_ok()); // default config has no profiles
+    }
+
+    #[test]
+    fn test_resolve_em_dash_replacement() {
+        let config = CcvvConfig::default();
+        let resolved = resolve_config(&config, None).unwrap();
+        assert_eq!(resolved.em_dash_replacement, "--");
+    }
+
+    #[test]
+    fn test_resolve_double_tap_adaptive() {
+        let toml_str = r#"
+[settings]
+double_tap_window_ms = "auto"
+"#;
+        let config: CcvvConfig = toml::from_str(toml_str).unwrap();
+        let resolved = resolve_config(&config, None).unwrap();
+        assert!(resolved.resolved_double_tap_ms.is_none());
     }
 
     #[test]
@@ -484,7 +614,7 @@ auto_wrapper = true
     #[test]
     fn test_validate_invalid_double_tap_window() {
         let mut config = CcvvConfig::default();
-        config.settings.double_tap_window_ms = 50; // too low
+        config.settings.double_tap_window_ms = DoubleTapSetting::Fixed(50); // too low
         let errors = validate_config(&config);
         assert!(errors.iter().any(|e| e.contains("double_tap_window_ms")));
     }
@@ -512,7 +642,38 @@ bundle_ids = ["com.example.app"]
 "#;
         let config: CcvvConfig = toml::from_str(toml_str).unwrap();
         let resolved = resolve_config(&config, None).unwrap();
-        assert_eq!(resolved.url_global_deny, vec!["custom_tracking"]);
-        assert_eq!(resolved.exclusion_bundle_ids, vec!["com.example.app"]);
+        // URL deny: defaults + user additions
+        assert!(resolved.url_global_deny.contains(&"utm_source".to_string()));
+        assert!(resolved
+            .url_global_deny
+            .contains(&"custom_tracking".to_string()));
+        // Exclusions: defaults + user additions
+        assert!(resolved
+            .exclusion_bundle_ids
+            .contains(&"com.1password.1password".to_string()));
+        assert!(resolved
+            .exclusion_bundle_ids
+            .contains(&"com.example.app".to_string()));
+    }
+
+    #[test]
+    fn test_default_config_has_exclusions() {
+        let config = CcvvConfig::default();
+        let resolved = resolve_config(&config, None).unwrap();
+        assert_eq!(
+            resolved.exclusion_bundle_ids.len(),
+            DEFAULT_EXCLUSION_BUNDLE_IDS.len()
+        );
+        assert!(resolved
+            .exclusion_bundle_ids
+            .contains(&"com.1password.1password".to_string()));
+    }
+
+    #[test]
+    fn test_default_config_has_url_deny() {
+        let config = CcvvConfig::default();
+        let resolved = resolve_config(&config, None).unwrap();
+        assert!(resolved.url_global_deny.contains(&"utm_source".to_string()));
+        assert!(resolved.url_global_deny.contains(&"fbclid".to_string()));
     }
 }

@@ -7,6 +7,9 @@ TEAM_ID="4JRN737CHR"
 BUNDLE_ID="com.ccvv.app"
 NOTARIZE=0
 SKIP_RUST=0
+DEPLOYMENT_TARGET="${CCVV_MACOS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-26.0}}"
+SWIFT_ARCH="$(uname -m)"
+SWIFT_TARGET="${SWIFT_ARCH}-apple-macos${DEPLOYMENT_TARGET}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CORE_DIR="$SCRIPT_DIR/../core"
@@ -19,6 +22,8 @@ for arg in "$@"; do
 done
 
 mkdir -p "$BUILD_DIR"
+export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+echo "Using macOS deployment target: $MACOSX_DEPLOYMENT_TARGET ($SWIFT_TARGET)"
 
 # --- Step 1: Build Rust static library ---
 if [[ "$SKIP_RUST" -eq 0 ]]; then
@@ -63,6 +68,7 @@ echo "Compiling Swift..."
 swiftc -o "$BUILD_DIR/$APP_NAME" main.swift \
     -framework Cocoa \
     -framework ApplicationServices \
+    -target "$SWIFT_TARGET" \
     -import-objc-header "$BUILD_DIR/ccvv-bridge.h" \
     -L "$(dirname "$LIB_PATH")" \
     -lccvv_lib \

@@ -4,13 +4,13 @@
 //! ordered canonically (see §5.2 of the technical spec) and cannot be
 //! reordered by configuration — only toggled on/off.
 
-pub mod normalize;
-pub mod whitespace;
 pub mod agent;
+pub mod autowrap;
+pub mod normalize;
 pub mod structural;
 pub mod url;
-pub mod autowrap;
 pub mod userrules;
+pub mod whitespace;
 
 /// Metadata that flows through the pipeline alongside the text.
 /// Stages read and annotate this to communicate downstream.

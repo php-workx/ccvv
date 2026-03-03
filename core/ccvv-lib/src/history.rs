@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -46,7 +46,7 @@ pub struct HistoryEntry {
     pub content_type: Option<String>,
     pub preview: String,
     pub committed: bool,
-    pub created_at: String,
+    pub created_at: i64,
 }
 
 /// History database backed by SQLite.
@@ -61,19 +61,18 @@ impl HistoryDb {
     /// Open or create the history database.
     pub fn open(path: &Path) -> Result<Self, CcvvError> {
         // If the database file exists and is corrupt, rename and start fresh
-        if path.exists() {
-            if let Err(_) = Connection::open(path).and_then(|conn| {
-                conn.execute_batch("SELECT count(*) FROM sqlite_master")?;
-                Ok(conn)
-            }) {
-                let backup = path.with_extension("db.corrupt");
-                std::fs::rename(path, &backup).map_err(|e| {
-                    CcvvError::DatabaseCorrupt(format!(
-                        "Failed to rename corrupt DB: {}",
-                        e
-                    ))
-                })?;
-            }
+        if path.exists()
+            && Connection::open(path)
+                .and_then(|conn| {
+                    conn.execute_batch("SELECT count(*) FROM sqlite_master")?;
+                    Ok(conn)
+                })
+                .is_err()
+        {
+            let backup = path.with_extension("db.corrupt");
+            std::fs::rename(path, &backup).map_err(|e| {
+                CcvvError::DatabaseCorrupt(format!("Failed to rename corrupt DB: {}", e))
+            })?;
         }
 
         // Ensure parent directory exists
@@ -81,8 +80,14 @@ impl HistoryDb {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(path)
-            .map_err(|e| CcvvError::Database(e.to_string()))?;
+        let conn = Connection::open(path).map_err(|e| CcvvError::Database(e.to_string()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(path, perms);
+        }
 
         // Configure pragmas
         conn.execute_batch(
@@ -102,7 +107,7 @@ impl HistoryDb {
                 content_type TEXT,
                 preview TEXT NOT NULL DEFAULT '',
                 committed INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             );
             CREATE INDEX IF NOT EXISTS idx_history_raw_hash ON history(raw_hash);
             CREATE INDEX IF NOT EXISTS idx_history_committed ON history(committed);
@@ -140,9 +145,10 @@ impl HistoryDb {
             None
         };
 
-        let conn = self.conn.lock().map_err(|e| {
-            CcvvError::Database(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CcvvError::Database(format!("Lock error: {}", e)))?;
 
         conn.execute(
             "INSERT INTO history (raw_hash, raw_text, cleaned_text, content_type, preview, committed)
@@ -154,9 +160,10 @@ impl HistoryDb {
         let id = conn.last_insert_rowid();
 
         // Add to undo buffer
-        let mut buffer = self.undo_buffer.lock().map_err(|e| {
-            CcvvError::Database(format!("Lock error: {}", e))
-        })?;
+        let mut buffer = self
+            .undo_buffer
+            .lock()
+            .map_err(|e| CcvvError::Database(format!("Lock error: {}", e)))?;
         if buffer.len() >= MAX_UNDO_ENTRIES {
             buffer.pop_front();
         }
@@ -171,9 +178,10 @@ impl HistoryDb {
 
     /// Two-phase commit: commit (committed=1).
     pub fn commit_entry(&self, id: i64) -> Result<(), CcvvError> {
-        let conn = self.conn.lock().map_err(|e| {
-            CcvvError::Database(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CcvvError::Database(format!("Lock error: {}", e)))?;
 
         conn.execute(
             "UPDATE history SET committed = 1 WHERE id = ?1",
@@ -189,9 +197,10 @@ impl HistoryDb {
 
     /// Rollback an uncommitted entry.
     pub fn rollback_entry(&self, id: i64) -> Result<(), CcvvError> {
-        let conn = self.conn.lock().map_err(|e| {
-            CcvvError::Database(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CcvvError::Database(format!("Lock error: {}", e)))?;
 
         conn.execute(
             "DELETE FROM history WHERE id = ?1 AND committed = 0",
@@ -204,9 +213,10 @@ impl HistoryDb {
 
     /// Clean up uncommitted entries (from crashes).
     pub fn cleanup_uncommitted(&self) -> Result<(), CcvvError> {
-        let conn = self.conn.lock().map_err(|e| {
-            CcvvError::Database(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CcvvError::Database(format!("Lock error: {}", e)))?;
 
         conn.execute("DELETE FROM history WHERE committed = 0", [])
             .map_err(|e| CcvvError::Database(e.to_string()))?;
@@ -222,9 +232,10 @@ impl HistoryDb {
 
     /// Get recent history entries.
     pub fn recent(&self, limit: usize) -> Result<Vec<HistoryEntry>, CcvvError> {
-        let conn = self.conn.lock().map_err(|e| {
-            CcvvError::Database(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CcvvError::Database(format!("Lock error: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -246,7 +257,7 @@ impl HistoryDb {
                     content_type: row.get(4)?,
                     preview: row.get(5)?,
                     committed: row.get::<_, i32>(6)? == 1,
-                    created_at: row.get(7)?,
+                    created_at: row.get::<_, i64>(7)?,
                 })
             })
             .map_err(|e| CcvvError::Database(e.to_string()))?
@@ -258,9 +269,10 @@ impl HistoryDb {
 
     /// Search history by cleaned text content.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>, CcvvError> {
-        let conn = self.conn.lock().map_err(|e| {
-            CcvvError::Database(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CcvvError::Database(format!("Lock error: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -283,7 +295,7 @@ impl HistoryDb {
                     content_type: row.get(4)?,
                     preview: row.get(5)?,
                     committed: row.get::<_, i32>(6)? == 1,
-                    created_at: row.get(7)?,
+                    created_at: row.get::<_, i64>(7)?,
                 })
             })
             .map_err(|e| CcvvError::Database(e.to_string()))?
@@ -299,9 +311,10 @@ impl HistoryDb {
         content_type: &str,
         limit: usize,
     ) -> Result<Vec<HistoryEntry>, CcvvError> {
-        let conn = self.conn.lock().map_err(|e| {
-            CcvvError::Database(format!("Lock error: {}", e))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CcvvError::Database(format!("Lock error: {}", e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -323,7 +336,7 @@ impl HistoryDb {
                     content_type: row.get(4)?,
                     preview: row.get(5)?,
                     committed: row.get::<_, i32>(6)? == 1,
-                    created_at: row.get(7)?,
+                    created_at: row.get::<_, i64>(7)?,
                 })
             })
             .map_err(|e| CcvvError::Database(e.to_string()))?
@@ -359,10 +372,11 @@ fn compute_hash(text: &str) -> String {
 /// Create a short preview of text (first 80 chars, single line).
 fn make_preview(text: &str) -> String {
     let single_line = text.replace('\n', " ");
-    if single_line.len() <= 80 {
+    if single_line.chars().count() <= 80 {
         single_line
     } else {
-        format!("{}...", &single_line[..77])
+        let prefix: String = single_line.chars().take(77).collect();
+        format!("{}...", prefix)
     }
 }
 
@@ -507,5 +521,20 @@ mod tests {
         assert!(recent[0].raw_text.is_none());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_make_preview_handles_unicode_safely() {
+        let text =
+            "Still applies — you're capped at max_containers=3. Worth reviewing as you grow. Extra";
+        let preview = make_preview(text);
+        assert!(
+            preview.ends_with("..."),
+            "preview should truncate with ellipsis"
+        );
+        assert!(
+            preview.chars().count() <= 80,
+            "preview should be at most 80 chars"
+        );
     }
 }

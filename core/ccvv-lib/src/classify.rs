@@ -29,7 +29,9 @@ pub fn classify(text: &str) -> ContentType {
         for delimiter in ['\t', ',', ';'] {
             let counts: Vec<usize> = lines.iter().map(|l| l.matches(delimiter).count()).collect();
             if let Some(&first) = counts.first() {
-                if first >= 1 && counts.iter().filter(|&&c| c == first).count() * 100 / counts.len() >= 80 {
+                if first >= 1
+                    && counts.iter().filter(|&&c| c == first).count() * 100 / counts.len() >= 80
+                {
                     return ContentType::Table;
                 }
             }
@@ -41,7 +43,10 @@ pub fn classify(text: &str) -> ContentType {
         if trimmed.starts_with("#!") {
             return ContentType::Code;
         }
-        let indented = lines.iter().filter(|l| !l.is_empty() && l.starts_with(|c: char| c == ' ' || c == '\t')).count();
+        let indented = lines
+            .iter()
+            .filter(|l| !l.is_empty() && l.starts_with([' ', '\t']))
+            .count();
         let non_empty = lines.iter().filter(|l| !l.is_empty()).count();
         if non_empty > 0 && indented * 100 / non_empty >= 40 {
             return ContentType::Code;

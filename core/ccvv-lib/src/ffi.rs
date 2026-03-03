@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use crate::config::{load_config, resolve_config, ResolvedConfig};
 use crate::history::HistoryDb;
 use crate::pipeline::Pipeline;
+use crate::table_extract::extract_table;
 use crate::transforms::agent::AgentTransform;
 use crate::transforms::autowrap::AutowrapTransform;
 use crate::transforms::normalize::NormalizeTransform;
@@ -28,6 +29,16 @@ pub struct CcvvConfig {
 /// Opaque handle to a history database.
 pub struct CcvvHistory {
     db: HistoryDb,
+}
+
+/// Transform result with metadata, returned from `ccvv_transform` and `ccvv_transform_n`.
+#[repr(C)]
+pub struct CcvvTransformResult {
+    pub cleaned_text: *mut c_char,
+    pub summary: *mut c_char,
+    pub rules_count: u32,
+    pub skipped_sensitive: bool,
+    pub skipped_oversize: bool,
 }
 
 // --- String helpers ---
@@ -62,15 +73,17 @@ unsafe fn set_error(error_out: *mut *mut c_char, msg: &str) {
 
 /// Helper: convert Rust string to C string. Returns null on failure.
 fn to_c_string(s: &str) -> *mut c_char {
-    CString::new(s).map(|cs| cs.into_raw()).unwrap_or(ptr::null_mut())
+    CString::new(s)
+        .map(|cs| cs.into_raw())
+        .unwrap_or(ptr::null_mut())
 }
 
 // --- Transform functions ---
 
 /// Transform text using the default pipeline configuration.
 ///
-/// Returns a newly allocated C string with the cleaned text.
-/// Caller must free with `ccvv_string_free`.
+/// Returns a `CcvvTransformResult` with cleaned text, summary, and metadata.
+/// Caller must free with `ccvv_transform_result_free`.
 ///
 /// # Safety
 /// `input` must be a valid null-terminated C string or null.
@@ -79,15 +92,21 @@ fn to_c_string(s: &str) -> *mut c_char {
 pub unsafe extern "C" fn ccvv_transform(
     input: *const c_char,
     error_out: *mut *mut c_char,
-) -> *mut c_char {
+) -> CcvvTransformResult {
     let Some(text) = (unsafe { cstr_to_str(input) }) else {
         unsafe { set_error(error_out, "null input") };
-        return ptr::null_mut();
+        return CcvvTransformResult {
+            cleaned_text: ptr::null_mut(),
+            summary: ptr::null_mut(),
+            rules_count: 0,
+            skipped_sensitive: false,
+            skipped_oversize: false,
+        };
     };
 
     let pipeline = build_default_pipeline();
-    let (result, _ctx) = pipeline.run(text);
-    to_c_string(&result)
+    let (result, ctx) = pipeline.run(text);
+    build_transform_result(&result, &ctx)
 }
 
 /// Transform text using a loaded config.
@@ -99,10 +118,16 @@ pub unsafe extern "C" fn ccvv_transform_n(
     input: *const c_char,
     config: *const CcvvConfig,
     error_out: *mut *mut c_char,
-) -> *mut c_char {
+) -> CcvvTransformResult {
     let Some(text) = (unsafe { cstr_to_str(input) }) else {
         unsafe { set_error(error_out, "null input") };
-        return ptr::null_mut();
+        return CcvvTransformResult {
+            cleaned_text: ptr::null_mut(),
+            summary: ptr::null_mut(),
+            rules_count: 0,
+            skipped_sensitive: false,
+            skipped_oversize: false,
+        };
     };
 
     let pipeline = if config.is_null() {
@@ -112,17 +137,20 @@ pub unsafe extern "C" fn ccvv_transform_n(
         build_pipeline_from_config(&cfg.resolved)
     };
 
-    let (result, _ctx) = pipeline.run(text);
-    to_c_string(&result)
+    let (result, ctx) = pipeline.run(text);
+    build_transform_result(&result, &ctx)
 }
 
-/// Free a transform result string. Alias for `ccvv_string_free`.
+/// Free a transform result. Frees both `cleaned_text` and `summary`.
 ///
 /// # Safety
-/// `result` must be a pointer returned by `ccvv_transform` or null.
+/// Fields must be pointers returned by `ccvv_transform`/`ccvv_transform_n`, or null.
 #[no_mangle]
-pub unsafe extern "C" fn ccvv_transform_result_free(result: *mut c_char) {
-    unsafe { ccvv_string_free(result) };
+pub unsafe extern "C" fn ccvv_transform_result_free(result: CcvvTransformResult) {
+    unsafe {
+        ccvv_string_free(result.cleaned_text);
+        ccvv_string_free(result.summary);
+    }
 }
 
 // --- Config functions ---
@@ -181,7 +209,10 @@ pub unsafe extern "C" fn ccvv_get_double_tap_window_ms(config: *const CcvvConfig
     if config.is_null() {
         return 450;
     }
-    unsafe { &*config }.resolved.settings.double_tap_window_ms
+    unsafe { &*config }
+        .resolved
+        .resolved_double_tap_ms
+        .unwrap_or(450)
 }
 
 /// Check if a feature is enabled in the config.
@@ -208,10 +239,72 @@ pub unsafe extern "C" fn ccvv_is_feature_enabled(
         "agent_strip" => settings.agent_strip,
         "structural_detection" => settings.structural_detection,
         "url_cleaning" => settings.url_cleaning,
+        "table_cell_picker" => settings.table_cell_picker,
         "auto_wrapper" => settings.auto_wrapper,
         "user_rules" => settings.user_rules,
         "sensitive_filter" => settings.sensitive_filter,
         _ => false,
+    }
+}
+
+/// Get the minimum confidence threshold for table cell picker.
+///
+/// # Safety
+/// `config` must be a valid pointer or null (returns default 0.75).
+#[no_mangle]
+pub unsafe extern "C" fn ccvv_get_table_picker_min_confidence(config: *const CcvvConfig) -> f32 {
+    if config.is_null() {
+        return crate::config::Settings::default().table_cell_picker_min_confidence;
+    }
+    unsafe { &*config }
+        .resolved
+        .settings
+        .table_cell_picker_min_confidence
+}
+
+/// Extract table rows/columns as JSON for UI cell picking.
+///
+/// Returns JSON with:
+/// - detected (bool)
+/// - format ("terminal" | "markdown" | "delimiter" | null)
+/// - confidence (float)
+/// - rows ([[string]])
+/// - warnings ([string])
+///
+/// # Safety
+/// `input` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn ccvv_extract_table_json(
+    input: *const c_char,
+    config: *const CcvvConfig,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    let Some(text) = (unsafe { cstr_to_str(input) }) else {
+        unsafe { set_error(error_out, "null input") };
+        return ptr::null_mut();
+    };
+
+    let (enabled, min_confidence) = if config.is_null() {
+        let defaults = crate::config::Settings::default();
+        (
+            defaults.table_cell_picker,
+            defaults.table_cell_picker_min_confidence,
+        )
+    } else {
+        let cfg = unsafe { &*config };
+        (
+            cfg.resolved.settings.table_cell_picker,
+            cfg.resolved.settings.table_cell_picker_min_confidence,
+        )
+    };
+
+    let extraction = extract_table(text).apply_gate(enabled, min_confidence);
+    match serde_json::to_string(&extraction) {
+        Ok(json) => to_c_string(&json),
+        Err(e) => {
+            unsafe { set_error(error_out, &format!("table extract json error: {}", e)) };
+            ptr::null_mut()
+        }
     }
 }
 
@@ -312,10 +405,50 @@ pub unsafe extern "C" fn ccvv_config_set_bool(
     }
     doc["settings"][key_str] = toml_edit::value(value);
 
-    match std::fs::write(path, doc.to_string()) {
-        Ok(()) => true,
+    // Atomic write: temp → fsync → rename
+    let tmp_path = path.with_extension("toml.tmp");
+    let content_bytes = doc.to_string();
+    let file = match std::fs::File::create(&tmp_path) {
+        Ok(f) => f,
         Err(e) => {
+            unsafe { set_error(error_out, &format!("create tmp error: {}", e)) };
+            return false;
+        }
+    };
+    {
+        use std::io::Write;
+        let mut writer = std::io::BufWriter::new(file);
+        if let Err(e) = writer.write_all(content_bytes.as_bytes()) {
             unsafe { set_error(error_out, &format!("write error: {}", e)) };
+            let _ = std::fs::remove_file(&tmp_path);
+            return false;
+        }
+        let file = match writer.into_inner() {
+            Ok(f) => f,
+            Err(e) => {
+                unsafe { set_error(error_out, &format!("flush error: {}", e)) };
+                let _ = std::fs::remove_file(&tmp_path);
+                return false;
+            }
+        };
+        if let Err(e) = file.sync_all() {
+            unsafe { set_error(error_out, &format!("sync error: {}", e)) };
+            let _ = std::fs::remove_file(&tmp_path);
+            return false;
+        }
+    }
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+            true
+        }
+        Err(e) => {
+            unsafe { set_error(error_out, &format!("rename error: {}", e)) };
+            let _ = std::fs::remove_file(&tmp_path);
             false
         }
     }
@@ -371,10 +504,50 @@ pub unsafe extern "C" fn ccvv_config_set_string(
     }
     doc["settings"][key_str] = toml_edit::value(value_str);
 
-    match std::fs::write(path, doc.to_string()) {
-        Ok(()) => true,
+    // Atomic write: temp → fsync → rename
+    let tmp_path = path.with_extension("toml.tmp");
+    let content_bytes = doc.to_string();
+    let file = match std::fs::File::create(&tmp_path) {
+        Ok(f) => f,
         Err(e) => {
+            unsafe { set_error(error_out, &format!("create tmp error: {}", e)) };
+            return false;
+        }
+    };
+    {
+        use std::io::Write;
+        let mut writer = std::io::BufWriter::new(file);
+        if let Err(e) = writer.write_all(content_bytes.as_bytes()) {
             unsafe { set_error(error_out, &format!("write error: {}", e)) };
+            let _ = std::fs::remove_file(&tmp_path);
+            return false;
+        }
+        let file = match writer.into_inner() {
+            Ok(f) => f,
+            Err(e) => {
+                unsafe { set_error(error_out, &format!("flush error: {}", e)) };
+                let _ = std::fs::remove_file(&tmp_path);
+                return false;
+            }
+        };
+        if let Err(e) = file.sync_all() {
+            unsafe { set_error(error_out, &format!("sync error: {}", e)) };
+            let _ = std::fs::remove_file(&tmp_path);
+            return false;
+        }
+    }
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+            true
+        }
+        Err(e) => {
+            unsafe { set_error(error_out, &format!("rename error: {}", e)) };
+            let _ = std::fs::remove_file(&tmp_path);
             false
         }
     }
@@ -441,7 +614,8 @@ pub unsafe extern "C" fn ccvv_history_prepare(
     };
 
     let h = unsafe { &*history };
-    match h.db.prepare(raw, cleaned, None, store_raw) {
+    let content_type = Some(crate::classify::classify(cleaned));
+    match h.db.prepare(raw, cleaned, content_type, store_raw) {
         Ok(id) => id,
         Err(e) => {
             unsafe { set_error(error_out, &e.to_string()) };
@@ -544,6 +718,8 @@ pub unsafe extern "C" fn ccvv_history_get_recent_json(
                     serde_json::json!({
                         "id": e.id,
                         "preview": e.preview,
+                        "cleaned_text": e.cleaned_text,
+                        "raw_text": e.raw_text,
                         "content_type": e.content_type,
                         "created_at": e.created_at,
                     })
@@ -588,6 +764,7 @@ pub unsafe extern "C" fn ccvv_history_search_json(
                         "id": e.id,
                         "preview": e.preview,
                         "cleaned_text": e.cleaned_text,
+                        "raw_text": e.raw_text,
                         "content_type": e.content_type,
                         "created_at": e.created_at,
                     })
@@ -650,6 +827,70 @@ pub extern "C" fn ccvv_timing_get_threshold_ms() -> u32 {
     }
 }
 
+// --- Result builder helpers ---
+
+/// Build a `CcvvTransformResult` from pipeline output and context.
+fn build_transform_result(
+    cleaned: &str,
+    ctx: &crate::transforms::TransformContext,
+) -> CcvvTransformResult {
+    let summary = build_hud_summary(&ctx.rules_fired);
+
+    CcvvTransformResult {
+        cleaned_text: to_c_string(cleaned),
+        summary: to_c_string(&summary),
+        rules_count: ctx.rules_fired.len() as u32,
+        skipped_sensitive: ctx.skipped_sensitive,
+        skipped_oversize: ctx.skipped_oversize,
+    }
+}
+
+fn action_label_for_stage(stage: &str) -> &'static str {
+    match stage {
+        "normalize_unicode" => "Normalized text formatting",
+        "whitespace_cleanup" => "Cleaned whitespace",
+        "agent_strip" => "Removed hidden characters",
+        "structural_detection" => "Structured content",
+        "url_cleaning" => "Removed tracking parameters",
+        "auto_wrapper" => "Wrapped code-like tokens",
+        "user_rules" => "Applied custom rules",
+        _ => "Applied cleanup",
+    }
+}
+
+fn build_hud_summary(rules: &[crate::transforms::RuleFired]) -> String {
+    if rules.is_empty() {
+        return "No changes needed".to_string();
+    }
+
+    let mut seen_stages: Vec<&str> = Vec::new();
+    let mut actions: Vec<&str> = Vec::new();
+
+    for rule in rules {
+        if seen_stages.contains(&rule.stage) {
+            continue;
+        }
+        seen_stages.push(rule.stage);
+        actions.push(action_label_for_stage(rule.stage));
+    }
+
+    if actions.is_empty() {
+        return "Cleaned clipboard".to_string();
+    }
+
+    const MAX_ACTIONS: usize = 2;
+    if actions.len() <= MAX_ACTIONS {
+        return actions.join(" · ");
+    }
+
+    format!(
+        "{} · {} +{} more",
+        actions[0],
+        actions[1],
+        actions.len() - MAX_ACTIONS
+    )
+}
+
 // --- Pipeline builder helpers ---
 
 /// Build a pipeline with all stages enabled (default config).
@@ -672,8 +913,7 @@ fn build_pipeline_from_config(config: &ResolvedConfig) -> Pipeline {
 
     if config.settings.normalize_unicode {
         stages.push(Box::new(
-            NormalizeTransform::new()
-                .with_em_dash_replacement(config.settings.em_dash_replace),
+            NormalizeTransform::new().with_em_dash_replacement(&config.em_dash_replacement),
         ));
     }
     if config.settings.whitespace_cleanup {
@@ -686,9 +926,13 @@ fn build_pipeline_from_config(config: &ResolvedConfig) -> Pipeline {
         stages.push(Box::new(StructuralTransform::new()));
     }
     if config.settings.url_cleaning {
-        stages.push(Box::new(
-            UrlTransform::new().with_strip_scheme(config.settings.url_strip_scheme),
-        ));
+        let mut url_transform =
+            UrlTransform::new().with_strip_scheme(config.settings.url_strip_scheme);
+        if !config.url_domain_overrides.is_empty() {
+            url_transform =
+                url_transform.with_domain_overrides(config.url_domain_overrides.clone());
+        }
+        stages.push(Box::new(url_transform));
     }
     if config.settings.auto_wrapper {
         stages.push(Box::new(AutowrapTransform::new()));
@@ -702,4 +946,190 @@ fn build_pipeline_from_config(config: &ResolvedConfig) -> Pipeline {
     Pipeline::new(stages)
         .with_max_input_bytes(config.settings.max_input_bytes)
         .with_sensitive_filter(config.settings.sensitive_filter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transforms::{RuleFired, TransformContext};
+    use std::ffi::{CStr, CString};
+
+    #[test]
+    fn test_summary_uses_compact_action_labels() {
+        let mut ctx = TransformContext::default();
+        ctx.rules_fired.push(RuleFired {
+            stage: "normalize_unicode",
+            description: "normalized 5 bytes of unicode content".to_string(),
+            chars_changed: 5,
+        });
+        ctx.rules_fired.push(RuleFired {
+            stage: "url_cleaning",
+            description: "cleaned 12 bytes from URLs".to_string(),
+            chars_changed: 12,
+        });
+
+        let result = build_transform_result("cleaned", &ctx);
+        let summary = unsafe { CStr::from_ptr(result.summary) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        unsafe { ccvv_transform_result_free(result) };
+
+        assert_eq!(
+            summary,
+            "Normalized text formatting · Removed tracking parameters"
+        );
+    }
+
+    #[test]
+    fn test_summary_limits_actions_and_deduplicates_stages() {
+        let mut ctx = TransformContext::default();
+        ctx.rules_fired.push(RuleFired {
+            stage: "normalize_unicode",
+            description: "normalized 2 bytes of unicode content".to_string(),
+            chars_changed: 2,
+        });
+        ctx.rules_fired.push(RuleFired {
+            stage: "normalize_unicode",
+            description: "normalized 4 bytes of unicode content".to_string(),
+            chars_changed: 4,
+        });
+        ctx.rules_fired.push(RuleFired {
+            stage: "url_cleaning",
+            description: "cleaned 9 bytes from URLs".to_string(),
+            chars_changed: 9,
+        });
+        ctx.rules_fired.push(RuleFired {
+            stage: "agent_strip",
+            description: "removed 3 bytes of agent artifacts".to_string(),
+            chars_changed: 3,
+        });
+
+        let result = build_transform_result("cleaned", &ctx);
+        let summary = unsafe { CStr::from_ptr(result.summary) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        unsafe { ccvv_transform_result_free(result) };
+
+        assert_eq!(
+            summary,
+            "Normalized text formatting · Removed tracking parameters +1 more"
+        );
+    }
+
+    #[test]
+    fn test_config_set_bool_updates_value_in_file() {
+        let dir = std::env::temp_dir().join("ccvv-ffi-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("config-{}-set-bool.toml", std::process::id()));
+        std::fs::write(&path, "[settings]\nauto_wrapper = false\n").unwrap();
+
+        let key = CString::new("auto_wrapper").unwrap();
+        let config_path = CString::new(path.to_string_lossy().to_string()).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+
+        let ok =
+            unsafe { ccvv_config_set_bool(key.as_ptr(), true, config_path.as_ptr(), &mut err) };
+        if !err.is_null() {
+            let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().to_string();
+            unsafe { ccvv_string_free(err) };
+            panic!("unexpected error from ccvv_config_set_bool: {}", msg);
+        }
+        assert!(ok, "ccvv_config_set_bool should succeed");
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("auto_wrapper = true"),
+            "expected auto_wrapper=true in file, got:\n{}",
+            written
+        );
+    }
+
+    #[test]
+    fn test_config_set_bool_preserves_other_settings() {
+        let dir = std::env::temp_dir().join("ccvv-ffi-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("config-{}-preserve.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[settings]\nauto_wrapper = false\nsensitive_filter = true\n",
+        )
+        .unwrap();
+
+        let key = CString::new("auto_wrapper").unwrap();
+        let config_path = CString::new(path.to_string_lossy().to_string()).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+
+        let ok =
+            unsafe { ccvv_config_set_bool(key.as_ptr(), true, config_path.as_ptr(), &mut err) };
+        if !err.is_null() {
+            let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().to_string();
+            unsafe { ccvv_string_free(err) };
+            panic!("unexpected error from ccvv_config_set_bool: {}", msg);
+        }
+        assert!(ok, "ccvv_config_set_bool should succeed");
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("auto_wrapper = true"));
+        assert!(
+            written.contains("sensitive_filter = true"),
+            "other settings should be preserved, got:\n{}",
+            written
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_config_set_bool_sets_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("ccvv-ffi-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("config-{}-mode.toml", std::process::id()));
+        std::fs::write(&path, "[settings]\nauto_wrapper = false\n").unwrap();
+
+        let key = CString::new("auto_wrapper").unwrap();
+        let config_path = CString::new(path.to_string_lossy().to_string()).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+
+        let ok =
+            unsafe { ccvv_config_set_bool(key.as_ptr(), true, config_path.as_ptr(), &mut err) };
+        if !err.is_null() {
+            let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().to_string();
+            unsafe { ccvv_string_free(err) };
+            panic!("unexpected error from ccvv_config_set_bool: {}", msg);
+        }
+        assert!(ok, "ccvv_config_set_bool should succeed");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected config mode 0600, got {:o}", mode);
+    }
+
+    #[test]
+    fn test_extract_table_json_detects_delimiter_table() {
+        let input = CString::new("org\tstatus\nmodal\tok").unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+
+        let ptr = unsafe { ccvv_extract_table_json(input.as_ptr(), std::ptr::null(), &mut err) };
+        if !err.is_null() {
+            let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().to_string();
+            unsafe { ccvv_string_free(err) };
+            panic!("unexpected error from ccvv_extract_table_json: {}", msg);
+        }
+
+        let json = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string();
+        unsafe { ccvv_string_free(ptr) };
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["detected"], true);
+        assert_eq!(value["format"], "delimiter");
+        assert_eq!(value["rows"][1][1], "ok");
+    }
+
+    #[test]
+    fn test_get_table_picker_min_confidence_default() {
+        let value = unsafe { ccvv_get_table_picker_min_confidence(std::ptr::null()) };
+        assert!((value - 0.75).abs() < f32::EPSILON);
+    }
 }

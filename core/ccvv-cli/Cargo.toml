@@ -12,3 +12,7 @@ path = "src/main.rs"
 ccvv-lib = { path = "../ccvv-lib" }
 clap = { version = "4", features = ["derive"] }
 similar = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

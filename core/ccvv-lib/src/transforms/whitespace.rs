@@ -183,7 +183,8 @@ fn detect_terminal_width(raw_lines: &[&str]) -> usize {
         .filter(|&len| len > 40)
         .collect();
 
-    let mut length_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut length_counts: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
     for &len in &raw_lengths {
         *length_counts.entry(len).or_insert(0) += 1;
     }
@@ -200,7 +201,7 @@ fn looks_like_paragraph_start(line: &str) -> bool {
     if is_list_item(line) {
         return true;
     }
-    line.chars().next().map_or(false, |c| c.is_uppercase())
+    line.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 /// Check if a line is a list item.
@@ -353,7 +354,8 @@ mod tests {
 
     #[test]
     fn test_excessive_leading_whitespace() {
-        let input = "First paragraph.\n                         Second paragraph after excessive indent.";
+        let input =
+            "First paragraph.\n                         Second paragraph after excessive indent.";
         let result = ccvv(input);
         // Excessive indent (>20) should cause paragraph break
         assert!(result.contains("First paragraph."));

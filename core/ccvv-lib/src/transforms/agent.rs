@@ -6,11 +6,10 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use super::{Transform, TransformContext, RuleFired};
+use super::{RuleFired, Transform, TransformContext};
 
 /// ANSI escape sequence regex, compiled once.
-static ANSI_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\x1B\[[0-9;]*[A-Za-z]").unwrap());
+static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1B\[[0-9;]*[A-Za-z]").unwrap());
 
 /// Zero-width characters to remove.
 const ZERO_WIDTH_CHARS: &[char] = &[

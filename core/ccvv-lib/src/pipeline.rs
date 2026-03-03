@@ -97,11 +97,7 @@ impl Pipeline {
     }
 
     /// Run only named stages. Used by CLI `--strip-urls`, `--unwrap`, etc.
-    pub fn run_selective(
-        &self,
-        input: &str,
-        stage_names: &[&str],
-    ) -> (String, TransformContext) {
+    pub fn run_selective(&self, input: &str, stage_names: &[&str]) -> (String, TransformContext) {
         let mut ctx = TransformContext {
             input_size_bytes: input.len(),
             ..Default::default()
@@ -187,8 +183,7 @@ mod tests {
 
     #[test]
     fn test_oversize_input() {
-        let pipeline = Pipeline::new(vec![Box::new(NoopTransform)])
-            .with_max_input_bytes(10);
+        let pipeline = Pipeline::new(vec![Box::new(NoopTransform)]).with_max_input_bytes(10);
         let (result, ctx) = pipeline.run("this is longer than 10 bytes");
         assert_eq!(result, "this is longer than 10 bytes");
         assert!(ctx.skipped_oversize);
@@ -205,8 +200,7 @@ mod tests {
 
     #[test]
     fn test_sensitive_filter_disabled() {
-        let pipeline = Pipeline::new(vec![Box::new(NoopTransform)])
-            .with_sensitive_filter(false);
+        let pipeline = Pipeline::new(vec![Box::new(NoopTransform)]).with_sensitive_filter(false);
         let input = "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----";
         let (_result, ctx) = pipeline.run(input);
         assert!(!ctx.skipped_sensitive);
@@ -225,8 +219,7 @@ mod tests {
     #[test]
     fn test_expansion_guard_trips() {
         // Use a ratio of 1.5 so the doubler (2.0x) trips it
-        let pipeline = Pipeline::new(vec![Box::new(DoublerTransform)])
-            .with_max_output_ratio(1.5);
+        let pipeline = Pipeline::new(vec![Box::new(DoublerTransform)]).with_max_output_ratio(1.5);
         let input = "hello";
         let (result, _ctx) = pipeline.run(input);
         // Should return original since expansion exceeded 1.5x
@@ -235,18 +228,14 @@ mod tests {
 
     #[test]
     fn test_selective_run() {
-        let pipeline = Pipeline::new(vec![
-            Box::new(NoopTransform),
-        ]);
+        let pipeline = Pipeline::new(vec![Box::new(NoopTransform)]);
         let (result, _ctx) = pipeline.run_selective("hello", &["noop"]);
         assert_eq!(result, "hello");
     }
 
     #[test]
     fn test_selective_run_skips_unselected() {
-        let pipeline = Pipeline::new(vec![
-            Box::new(DoublerTransform),
-        ]);
+        let pipeline = Pipeline::new(vec![Box::new(DoublerTransform)]);
         // Request a stage that doesn't exist — doubler should be skipped
         let (result, _ctx) = pipeline.run_selective("hello", &["nonexistent"]);
         assert_eq!(result, "hello");

@@ -184,18 +184,18 @@ impl StructuralTransform {
         if is_header {
             // Use first row as header
             output.push_str("| ");
-            output.push_str(&header.iter().map(|s| s.trim()).collect::<Vec<_>>().join(" | "));
+            output.push_str(
+                &header
+                    .iter()
+                    .map(|s| s.trim())
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            );
             output.push_str(" |\n");
 
             // Separator
             output.push_str("| ");
-            output.push_str(
-                &header
-                    .iter()
-                    .map(|_| "---")
-                    .collect::<Vec<_>>()
-                    .join(" | "),
-            );
+            output.push_str(&header.iter().map(|_| "---").collect::<Vec<_>>().join(" | "));
             output.push_str(" |\n");
 
             // Data rows
@@ -337,17 +337,64 @@ fn detect_language(input: &str) -> Option<&'static str> {
 
     let keywords: &[(&[&str], usize)] = &[
         // Python
-        (&["def ", "import ", "print(", "class ", "elif ", "self.", "from "], 0),
+        (
+            &[
+                "def ", "import ", "print(", "class ", "elif ", "self.", "from ",
+            ],
+            0,
+        ),
         // Rust
-        (&["fn ", "let mut ", "impl ", "use std::", "pub fn ", "match ", "&self", "println!", "::"], 1),
+        (
+            &[
+                "fn ",
+                "let mut ",
+                "impl ",
+                "use std::",
+                "pub fn ",
+                "match ",
+                "&self",
+                "println!",
+                "::",
+            ],
+            1,
+        ),
         // JavaScript
-        (&["function ", "const ", "=> ", "console.", "require(", "module.exports"], 2),
+        (
+            &[
+                "function ",
+                "const ",
+                "=> ",
+                "console.",
+                "require(",
+                "module.exports",
+            ],
+            2,
+        ),
         // Swift
-        (&["func ", "var ", "import Foundation", "guard let", "@objc", "NSObject"], 3),
+        (
+            &[
+                "func ",
+                "var ",
+                "import Foundation",
+                "guard let",
+                "@objc",
+                "NSObject",
+            ],
+            3,
+        ),
         // Go
         (&["package ", "fmt.", "go ", ":= ", "interface{"], 4),
         // Java
-        (&["public class", "System.out", "private ", "protected ", "@Override"], 5),
+        (
+            &[
+                "public class",
+                "System.out",
+                "private ",
+                "protected ",
+                "@Override",
+            ],
+            5,
+        ),
     ];
 
     for (patterns, lang_idx) in keywords {
@@ -491,6 +538,9 @@ mod tests {
         let first = transform.apply(input, &mut ctx);
         let mut ctx2 = TransformContext::default();
         let second = transform.apply(&first, &mut ctx2);
-        assert_eq!(first, second, "Structural JSON transform must be idempotent");
+        assert_eq!(
+            first, second,
+            "Structural JSON transform must be idempotent"
+        );
     }
 }

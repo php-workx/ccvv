@@ -528,14 +528,7 @@ class CcvvCore {
     static let shared = CcvvCore()
 
     private init() {
-        // Load config (uses default path ~/.ccvv/config.toml)
-        var configErr: UnsafeMutablePointer<CChar>?
-        config = ccvv_load_config(nil, &configErr)
-        if let err = configErr {
-            let msg = String(cString: err)
-            log("CcvvCore: config load note: \(msg)")
-            ccvv_string_free(err)
-        }
+        _ = reloadConfig()
 
         // Open history DB (uses default path ~/.ccvv/history.db)
         var histErr: UnsafeMutablePointer<CChar>?
@@ -547,6 +540,27 @@ class CcvvCore {
         }
     }
 
+    /// Reload config from disk and swap into the active pipeline.
+    @discardableResult
+    func reloadConfig() -> Bool {
+        var configErr: UnsafeMutablePointer<CChar>?
+        let newConfig = ccvv_load_config(nil, &configErr)
+        if let err = configErr {
+            let msg = String(cString: err)
+            log("CcvvCore: config load note: \(msg)")
+            ccvv_string_free(err)
+        }
+        guard let loaded = newConfig else {
+            log("CcvvCore: config reload failed; keeping previous config")
+            return false
+        }
+        if let existing = config {
+            ccvv_config_free(existing)
+        }
+        config = loaded
+        return true
+    }
+
     deinit {
         if let config = config {
             ccvv_config_free(config)
@@ -556,33 +570,83 @@ class CcvvCore {
         }
     }
 
+    /// Transform result with metadata from the Rust pipeline.
+    struct TransformResult {
+        let cleanedText: String
+        let summary: String
+        let rulesCount: UInt32
+        let skippedSensitive: Bool
+        let skippedOversize: Bool
+    }
+
+    struct TableExtractionResult: Decodable {
+        let detected: Bool
+        let format: String?
+        let confidence: Double
+        let rows: [[String]]
+        let warnings: [String]
+    }
+
     /// Transform text using the Rust pipeline.
     /// Falls back to the Swift ccvv() function if FFI fails.
     func transform(_ input: String) -> String {
+        return transformWithResult(input).cleanedText
+    }
+
+    /// Transform text and return full result with metadata.
+    func transformWithResult(_ input: String) -> TransformResult {
         var errPtr: UnsafeMutablePointer<CChar>?
-        let resultPtr: UnsafeMutablePointer<CChar>?
+        let ffiResult: CcvvTransformResult
 
         if let config = config {
-            resultPtr = ccvv_transform_n(input, config, &errPtr)
+            ffiResult = ccvv_transform_n(input, config, &errPtr)
         } else {
-            resultPtr = ccvv_transform(input, &errPtr)
+            ffiResult = ccvv_transform(input, &errPtr)
         }
 
         if let err = errPtr {
             let msg = String(cString: err)
             log("CcvvCore: transform error: \(msg), falling back to Swift")
             ccvv_string_free(err)
-            return ccvv(input)
+            return TransformResult(cleanedText: ccvv(input), summary: "fallback to Swift",
+                                   rulesCount: 0, skippedSensitive: false, skippedOversize: false)
         }
 
-        guard let result = resultPtr else {
+        guard let cleanedPtr = ffiResult.cleaned_text else {
             log("CcvvCore: transform returned null, falling back to Swift")
-            return ccvv(input)
+            return TransformResult(cleanedText: ccvv(input), summary: "fallback to Swift",
+                                   rulesCount: 0, skippedSensitive: false, skippedOversize: false)
         }
 
-        let output = String(cString: result)
-        ccvv_string_free(result)
-        return output
+        let output = String(cString: cleanedPtr)
+        let summary = ffiResult.summary != nil ? String(cString: ffiResult.summary) : "no changes"
+        let result = TransformResult(
+            cleanedText: output,
+            summary: summary,
+            rulesCount: ffiResult.rules_count,
+            skippedSensitive: ffiResult.skipped_sensitive,
+            skippedOversize: ffiResult.skipped_oversize
+        )
+        ccvv_transform_result_free(ffiResult)
+        return result
+    }
+
+    /// Parse clipboard text into table rows/columns for cell picker UI.
+    func extractTable(_ input: String) -> TableExtractionResult? {
+        var errPtr: UnsafeMutablePointer<CChar>?
+        let jsonPtr = ccvv_extract_table_json(input, config, &errPtr)
+
+        if let err = errPtr {
+            let msg = String(cString: err)
+            log("CcvvCore: table extract error: \(msg)")
+            ccvv_string_free(err)
+            return nil
+        }
+        guard let ptr = jsonPtr else { return nil }
+        let json = String(cString: ptr)
+        ccvv_string_free(ptr)
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(TableExtractionResult.self, from: data)
     }
 
     /// Get the double-tap window in seconds from config.
@@ -661,7 +725,7 @@ class CcvvCore {
 
 // MARK: - App Delegate
 
-let appVersion = "1.1.11"
+let appVersion = "1.2.0"
 
 let logFile: FileHandle? = {
     let path = NSHomeDirectory() + "/Library/Logs/ccvv.log"
@@ -678,6 +742,17 @@ func log(_ msg: String) {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    struct PendingCleanupCandidate {
+        let createdAt: Date
+        let sourceChangeCount: Int
+        let rawText: String
+        let cleanedText: String
+        let summary: String
+        let skippedSensitive: Bool
+        let skippedOversize: Bool
+        let tableExtraction: CcvvCore.TableExtractionResult?
+    }
+
     var statusItem: NSStatusItem!
     var eventTap: CFMachPort?
     var eventTapActive = false
@@ -688,6 +763,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var accessibilityCheckTimer: Timer?
     var preferencesWindow: PreferencesWindowController?
     var historyPopover: NSPopover?
+    var tablePickerWindow: TableCellPickerWindowController?
+    var isWritingBack = false
+    var writeBackChangeCount: Int = 0
+    var pendingCleanupCandidate: PendingCleanupCandidate?
+    var pendingCandidateExpiryTimer: Timer?
+    var precomputeGeneration: UInt64 = 0
+    var onboardingObserver: Any?
+    var onboardingWindow: NSWindow?
+    var onboardingCleanObserver: Any?
 
     var doubleCopyWindowSeconds: TimeInterval {
         let adaptive = CcvvCore.shared.adaptiveThresholdMs
@@ -697,6 +781,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return CcvvCore.shared.doubleTapWindowSeconds
     }
     let postCopySettleDelaySeconds: TimeInterval = 0.15
+    let precomputeClipboardWaitSeconds: TimeInterval = 0.8
+    let pendingCandidateTTLSeconds: TimeInterval = 1.0
 
     /// Confidence mode: track transform count for toast duration
     var transformCount: Int {
@@ -724,10 +810,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         checkAccessibilityAndSetup()
         startAccessibilityCheckTimer()
 
-        // First-run onboarding (after a short delay to let Accessibility prompt appear first)
+        // First-run onboarding (wait for Accessibility dialog to dismiss)
         if !UserDefaults.standard.bool(forKey: "ccvv_onboarding_done") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.showOnboarding()
+            onboardingObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                guard let self = self,
+                      !UserDefaults.standard.bool(forKey: "ccvv_onboarding_done") else { return }
+                if let token = self.onboardingObserver {
+                    NotificationCenter.default.removeObserver(token)
+                    self.onboardingObserver = nil
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.showOnboarding()
+                }
             }
         }
     }
@@ -801,7 +898,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let undoItem = NSMenuItem(
             title: "Undo Last Clean",
             action: #selector(undoLastClean),
-            keyEquivalent: "z"
+            keyEquivalent: ""
         )
         undoItem.target = self
         menu.addItem(undoItem)
@@ -811,7 +908,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pauseMenuItem = NSMenuItem(
             title: "Pause ccvv",
             action: #selector(togglePause),
-            keyEquivalent: "p"
+            keyEquivalent: ""
         )
         pauseMenuItem.target = self
         menu.addItem(pauseMenuItem)
@@ -821,7 +918,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let historyItem = NSMenuItem(
             title: "History...",
             action: #selector(showHistoryPopover),
-            keyEquivalent: "h"
+            keyEquivalent: ""
         )
         historyItem.target = self
         menu.addItem(historyItem)
@@ -829,7 +926,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let prefsItem = NSMenuItem(
             title: "Preferences...",
             action: #selector(showPreferences),
-            keyEquivalent: ","
+            keyEquivalent: ""
         )
         prefsItem.target = self
         menu.addItem(prefsItem)
@@ -839,7 +936,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let quitItem = NSMenuItem(
             title: "Quit",
             action: #selector(quitApp),
-            keyEquivalent: "q"
+            keyEquivalent: ""
         )
         quitItem.target = self
         menu.addItem(quitItem)
@@ -885,14 +982,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc func statusItemClicked(_ sender: NSStatusBarButton) {
-        guard let event = NSApp.currentEvent else { return }
-        if event.type == .rightMouseUp {
-            statusItem.menu = menu
-            statusItem.button?.performClick(nil)
-            statusItem.menu = nil
-        } else {
-            performClean()
-        }
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
     }
 
     @objc func cleanClipboardAction() {
@@ -933,7 +1025,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let popover = NSPopover()
-        popover.contentSize = NSSize(width: 360, height: 400)
+        popover.contentSize = NSSize(width: 720, height: 560)
         popover.behavior = .transient
         popover.contentViewController = HistoryViewController()
 
@@ -1012,11 +1104,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let elapsed = now.timeIntervalSince(lastCmdCAt)
 
         if elapsed <= doubleCopyWindowSeconds {
+            if isWritingBack { return }
             lastCmdCAt = .distantPast
             CcvvCore.shared.recordTimingSample(intervalMs: UInt32(elapsed * 1000))
             log("double Cmd+C detected (interval=\(String(format: "%.2f", elapsed))s)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + postCopySettleDelaySeconds) { [weak self] in
-                self?.performClean()
+            if applyPendingCandidateIfAvailable() {
+                return
+            }
+            let countBefore = NSPasteboard.general.changeCount
+            waitForClipboardUpdate(previousCount: countBefore, timeout: 0.5) { [weak self] updated in
+                guard let self = self else { return }
+                if !updated {
+                    log("double Cmd+C: no new clipboard change detected, using immediate fallback clean")
+                }
+                self.performClean()
             }
         } else {
             // Miss indicator: near-miss detection
@@ -1026,12 +1127,153 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             lastCmdCAt = now
+            beginFirstCopyPrecompute()
         }
     }
 
     // MARK: - Clipboard Cleaning
 
+    func waitForClipboardUpdate(previousCount: Int, timeout: TimeInterval = 0.2,
+                                  completion: @escaping (Bool) -> Void) {
+        let start = Date()
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { timer in
+            let current = NSPasteboard.general.changeCount
+            if current != previousCount && current != self.writeBackChangeCount {
+                timer.invalidate()
+                completion(true)
+            } else if Date().timeIntervalSince(start) >= timeout {
+                timer.invalidate()
+                completion(false)
+            }
+        }
+        RunLoop.current.add(timer, forMode: .common)
+    }
+
+    func beginFirstCopyPrecompute() {
+        precomputeGeneration &+= 1
+        let generation = precomputeGeneration
+        let previousCount = NSPasteboard.general.changeCount
+        waitForClipboardUpdate(previousCount: previousCount, timeout: precomputeClipboardWaitSeconds) { [weak self] updated in
+            guard let self = self else { return }
+            guard generation == self.precomputeGeneration else { return }
+            guard updated else {
+                self.clearPendingCleanupCandidate(reason: "precompute timeout")
+                return
+            }
+            self.capturePendingCleanupCandidate()
+        }
+    }
+
+    func capturePendingCleanupCandidate() {
+        if let frontApp = NSWorkspace.shared.frontmostApplication,
+           let bundleId = frontApp.bundleIdentifier,
+           CcvvCore.shared.isAppExcluded(bundleId: bundleId) {
+            clearPendingCleanupCandidate(reason: "app excluded")
+            return
+        }
+
+        let pb = NSPasteboard.general
+        guard let text = extractClipboardTextWithStyleHints(pb) else {
+            clearPendingCleanupCandidate(reason: "no text to precompute")
+            return
+        }
+
+        let originalText = pb.string(forType: .string) ?? text
+        let result = CcvvCore.shared.transformWithResult(text)
+        let table = CcvvCore.shared.extractTable(originalText)
+        pendingCleanupCandidate = PendingCleanupCandidate(
+            createdAt: Date(),
+            sourceChangeCount: pb.changeCount,
+            rawText: originalText,
+            cleanedText: result.cleanedText,
+            summary: result.summary,
+            skippedSensitive: result.skippedSensitive,
+            skippedOversize: result.skippedOversize,
+            tableExtraction: table
+        )
+
+        pendingCandidateExpiryTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: pendingCandidateTTLSeconds, repeats: false) { [weak self] _ in
+            self?.clearPendingCleanupCandidate(reason: "candidate expired")
+        }
+        pendingCandidateExpiryTimer = timer
+        RunLoop.current.add(timer, forMode: .common)
+
+        log("precomputed cleanup candidate (changeCount=\(pb.changeCount), table=\(table?.detected ?? false))")
+    }
+
+    func clearPendingCleanupCandidate(reason: String) {
+        if pendingCleanupCandidate != nil {
+            log("cleared pending cleanup candidate: \(reason)")
+        }
+        pendingCleanupCandidate = nil
+        pendingCandidateExpiryTimer?.invalidate()
+        pendingCandidateExpiryTimer = nil
+    }
+
+    @discardableResult
+    func applyPendingCandidateIfAvailable() -> Bool {
+        guard let candidate = pendingCleanupCandidate else { return false }
+        let age = Date().timeIntervalSince(candidate.createdAt)
+        if age > pendingCandidateTTLSeconds {
+            clearPendingCleanupCandidate(reason: "stale candidate")
+            return false
+        }
+        if NSPasteboard.general.changeCount != candidate.sourceChangeCount {
+            clearPendingCleanupCandidate(reason: "clipboard changed after precompute")
+            return false
+        }
+
+        clearPendingCleanupCandidate(reason: "consumed")
+
+        if let table = candidate.tableExtraction, table.detected {
+            presentTablePicker(extraction: table)
+            return true
+        }
+        if candidate.skippedSensitive {
+            showFeedback(success: false, message: "Skipped: looks like a secret")
+            return true
+        }
+        if candidate.skippedOversize {
+            let sizeKB = candidate.rawText.utf8.count / 1024
+            showFeedback(success: false, message: "Skipped: content too large (\(sizeKB) KB)")
+            return true
+        }
+        if candidate.cleanedText == candidate.rawText {
+            showFeedback(success: true, message: "No changes needed")
+            return true
+        }
+
+        let pb = NSPasteboard.general
+        isWritingBack = true
+        pb.clearContents()
+        guard pb.setString(candidate.cleanedText, forType: .string) else {
+            pb.clearContents()
+            _ = pb.setString(candidate.rawText, forType: .string)
+            isWritingBack = false
+            showFeedback(success: false, message: nil)
+            return true
+        }
+        writeBackChangeCount = pb.changeCount
+        isWritingBack = false
+
+        CcvvCore.shared.recordHistory(raw: candidate.rawText, cleaned: candidate.cleanedText, storeRaw: true)
+        transformCount += 1
+        NotificationCenter.default.post(name: Notification.Name("ccvv.cleanSuccess"), object: nil)
+
+        let message = candidate.summary.isEmpty ? "Cleaned" : candidate.summary
+        showFeedback(success: true, message: message)
+        return true
+    }
+
     func performClean() {
+        if let frontApp = NSWorkspace.shared.frontmostApplication,
+           let bundleId = frontApp.bundleIdentifier,
+           CcvvCore.shared.isAppExcluded(bundleId: bundleId) {
+            log("  app excluded: \(bundleId)")
+            return
+        }
+
         let pb = NSPasteboard.general
 
         log("performClean triggered")
@@ -1051,9 +1293,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         log("  extracted (\(text.count) chars): \(String(text.prefix(500)))")
 
         let originalText = pb.string(forType: .string) ?? text
-        let cleaned = CcvvCore.shared.transform(text)
+        let result = CcvvCore.shared.transformWithResult(text)
+        let cleaned = result.cleanedText
 
         log("  cleaned (\(cleaned.count) chars): \(String(cleaned.prefix(500)))")
+
+        // Check skip reasons before "no changes" comparison
+        if result.skippedSensitive {
+            log("  skipped: sensitive content detected")
+            showFeedback(success: false, message: "Skipped: looks like a secret")
+            return
+        }
+        if result.skippedOversize {
+            let sizeKB = text.utf8.count / 1024
+            log("  skipped: oversize content (\(sizeKB) KB)")
+            showFeedback(success: false, message: "Skipped: content too large (\(sizeKB) KB)")
+            return
+        }
+
+        if let extraction = CcvvCore.shared.extractTable(originalText), extraction.detected {
+            log("  table detected (format=\(extraction.format ?? "unknown"), confidence=\(String(format: "%.2f", extraction.confidence)))")
+            presentTablePicker(extraction: extraction)
+            return
+        }
 
         // Check if no changes
         if cleaned == originalText {
@@ -1062,31 +1324,72 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        isWritingBack = true
         pb.clearContents()
         guard pb.setString(cleaned, forType: .string) else {
             pb.clearContents()
             _ = pb.setString(originalText, forType: .string)
+            isWritingBack = false
             showFeedback(success: false, message: nil)
             return
         }
+        writeBackChangeCount = pb.changeCount
+        isWritingBack = false
 
         // Record history entry
-        CcvvCore.shared.recordHistory(raw: originalText, cleaned: cleaned)
+        CcvvCore.shared.recordHistory(raw: originalText, cleaned: cleaned, storeRaw: true)
 
         // Increment confidence counter
         transformCount += 1
 
-        let charDiff = originalText.count - cleaned.count
-        let message: String
-        if charDiff > 0 {
-            message = "Cleaned (\(charDiff) chars removed)"
-        } else if charDiff < 0 {
-            message = "Formatted (\(-charDiff) chars added)"
-        } else {
-            message = "Cleaned (content reformatted)"
+        // Post success notification (for onboarding auto-dismiss)
+        NotificationCenter.default.post(name: Notification.Name("ccvv.cleanSuccess"), object: nil)
+
+        let message = result.summary.isEmpty ? "Cleaned" : result.summary
+        showFeedback(success: true, message: message)
+    }
+
+    func presentTablePicker(extraction: CcvvCore.TableExtractionResult) {
+        if let existing = tablePickerWindow {
+            existing.close()
+            tablePickerWindow = nil
         }
 
-        showFeedback(success: true, message: message)
+        let picker = TableCellPickerWindowController(
+            extraction: extraction,
+            onCopy: { [weak self] rawCell, row, column in
+                self?.copyPickedTableCell(rawCell: rawCell, row: row, column: column)
+            },
+            onClose: { [weak self] in
+                self?.tablePickerWindow = nil
+            }
+        )
+        tablePickerWindow = picker
+        picker.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func copyPickedTableCell(rawCell: String, row: Int, column: Int) {
+        let result = CcvvCore.shared.transformWithResult(rawCell)
+        let cleanedCell = result.cleanedText
+
+        let pb = NSPasteboard.general
+        isWritingBack = true
+        pb.clearContents()
+        guard pb.setString(cleanedCell, forType: .string) else {
+            isWritingBack = false
+            showFeedback(success: false, message: "Failed to copy selected cell")
+            return
+        }
+        writeBackChangeCount = pb.changeCount
+        isWritingBack = false
+
+        CcvvCore.shared.recordHistory(raw: rawCell, cleaned: cleanedCell, storeRaw: true)
+        transformCount += 1
+
+        let location = "Copied cell r\(row + 1)c\(column + 1)"
+        let summary = result.summary == "No changes needed" ? location : "\(location) · \(result.summary)"
+        showFeedback(success: true, message: summary)
     }
 
     // MARK: - Feedback
@@ -1211,12 +1514,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         privacyLabel.frame = NSRect(x: 20, y: yOffset, width: 380, height: 50)
         contentView.addSubview(privacyLabel)
 
-        let dismissButton = NSButton(title: "Get Started", target: nil, action: nil)
-        dismissButton.frame = NSRect(x: 300, y: 20, width: 100, height: 32)
-        dismissButton.bezelStyle = .rounded
-        dismissButton.keyEquivalent = "\r"
-        contentView.addSubview(dismissButton)
-
         // Use a closure-based action
         class DismissTarget: NSObject {
             let window: NSWindow
@@ -1225,13 +1522,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 UserDefaults.standard.set(true, forKey: "ccvv_onboarding_done")
                 window.close()
             }
+            @objc func tryIt() {
+                if !AXIsProcessTrusted() {
+                    NSWorkspace.shared.open(
+                        URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+                    )
+                }
+                UserDefaults.standard.set(true, forKey: "ccvv_onboarding_done")
+                window.close()
+            }
         }
         let target = DismissTarget(window: window)
-        dismissButton.target = target
-        dismissButton.action = #selector(DismissTarget.dismiss)
+
+        let tryButton = NSButton(title: "Try it now", target: target, action: #selector(DismissTarget.tryIt))
+        tryButton.frame = NSRect(x: 190, y: 20, width: 100, height: 32)
+        tryButton.bezelStyle = .rounded
+        contentView.addSubview(tryButton)
+
+        let dismissButton = NSButton(title: "Get Started", target: target, action: #selector(DismissTarget.dismiss))
+        dismissButton.frame = NSRect(x: 300, y: 20, width: 100, height: 32)
+        dismissButton.bezelStyle = .rounded
+        dismissButton.keyEquivalent = "\r"
+        contentView.addSubview(dismissButton)
 
         // Keep reference alive
         objc_setAssociatedObject(window, "dismissTarget", target, .OBJC_ASSOCIATION_RETAIN)
+
+        // Store window reference for auto-dismiss
+        self.onboardingWindow = window
+
+        // Auto-dismiss on successful clean
+        onboardingCleanObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name("ccvv.cleanSuccess"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            UserDefaults.standard.set(true, forKey: "ccvv_onboarding_done")
+            self?.onboardingWindow?.close()
+            self?.onboardingWindow = nil
+            if let token = self?.onboardingCleanObserver {
+                NotificationCenter.default.removeObserver(token)
+                self?.onboardingCleanObserver = nil
+            }
+        }
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -1244,6 +1576,236 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
         }
+    }
+}
+
+// MARK: - Table Cell Picker
+
+class CellPickerTableView: NSTableView {
+    var onConfirm: (() -> Void)?
+    var onCancel: (() -> Void)?
+    var onColumnStep: ((Int) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 76: // Return / Enter
+            onConfirm?()
+        case 53: // Escape
+            onCancel?()
+        case 123: // Left arrow
+            onColumnStep?(-1)
+        case 124: // Right arrow
+            onColumnStep?(1)
+        default:
+            super.keyDown(with: event)
+        }
+    }
+}
+
+class TableCellPickerWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+    private let extraction: CcvvCore.TableExtractionResult
+    private let onCopy: (String, Int, Int) -> Void
+    private let onClose: () -> Void
+    private var rows: [[String]]
+    private var filteredIndices: [Int]
+    private var activeColumn = 0
+
+    private var searchField: NSSearchField!
+    private var tableView: CellPickerTableView!
+    private var selectionLabel: NSTextField!
+
+    init(
+        extraction: CcvvCore.TableExtractionResult,
+        onCopy: @escaping (String, Int, Int) -> Void,
+        onClose: @escaping () -> Void
+    ) {
+        self.extraction = extraction
+        self.onCopy = onCopy
+        self.onClose = onClose
+        self.rows = extraction.rows
+        self.filteredIndices = Array(extraction.rows.indices)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 640),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Pick Table Cell"
+        window.center()
+        super.init(window: window)
+        window.delegate = self
+        setupUI()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setupUI() {
+        guard let contentView = window?.contentView else { return }
+
+        searchField = NSSearchField(frame: NSRect(x: 16, y: 604, width: 948, height: 26))
+        searchField.placeholderString = "Search cells..."
+        searchField.target = self
+        searchField.action = #selector(searchChanged(_:))
+        contentView.addSubview(searchField)
+
+        let meta = NSTextField(labelWithString: "Format: \(extraction.format ?? "unknown") · Confidence: \(String(format: "%.2f", extraction.confidence))")
+        meta.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        meta.textColor = .secondaryLabelColor
+        meta.frame = NSRect(x: 16, y: 582, width: 948, height: 16)
+        contentView.addSubview(meta)
+
+        if let warning = extraction.warnings.first, !warning.isEmpty {
+            let warningLabel = NSTextField(labelWithString: warning)
+            warningLabel.font = NSFont.systemFont(ofSize: 11)
+            warningLabel.textColor = .systemOrange
+            warningLabel.frame = NSRect(x: 16, y: 564, width: 948, height: 16)
+            contentView.addSubview(warningLabel)
+        }
+
+        let scrollView = NSScrollView(frame: NSRect(x: 16, y: 56, width: 948, height: 500))
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+
+        tableView = CellPickerTableView(frame: scrollView.bounds)
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.allowsMultipleSelection = false
+        tableView.allowsColumnSelection = true
+        tableView.allowsColumnReordering = false
+        tableView.rowHeight = 24
+        tableView.target = self
+        tableView.action = #selector(tableClicked)
+        tableView.doubleAction = #selector(cellDoubleClicked)
+        tableView.onConfirm = { [weak self] in self?.confirmSelection() }
+        tableView.onCancel = { [weak self] in self?.closePicker() }
+        tableView.onColumnStep = { [weak self] step in self?.stepActiveColumn(step: step) }
+
+        let colCount = max(rows.map(\.count).max() ?? 0, 2)
+        for idx in 0..<colCount {
+            let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_\(idx)"))
+            col.title = "Col \(idx + 1)"
+            col.width = 220
+            tableView.addTableColumn(col)
+        }
+
+        scrollView.documentView = tableView
+        contentView.addSubview(scrollView)
+
+        selectionLabel = NSTextField(labelWithString: "Double-click a cell to copy · Enter copies selected row at active column · Esc closes")
+        selectionLabel.font = NSFont.systemFont(ofSize: 11)
+        selectionLabel.textColor = .secondaryLabelColor
+        selectionLabel.frame = NSRect(x: 16, y: 32, width: 700, height: 16)
+        contentView.addSubview(selectionLabel)
+
+        let doneButton = NSButton(title: "Done", target: self, action: #selector(closePicker))
+        doneButton.frame = NSRect(x: 886, y: 18, width: 78, height: 28)
+        doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\u{1b}"
+        contentView.addSubview(doneButton)
+
+        tableView.reloadData()
+        if !filteredIndices.isEmpty {
+            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
+        updateSelectionLabel()
+    }
+
+    @objc private func searchChanged(_ sender: NSSearchField) {
+        let query = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if query.isEmpty {
+            filteredIndices = Array(rows.indices)
+        } else {
+            filteredIndices = rows.indices.filter { idx in
+                rows[idx].contains { cell in
+                    cell.lowercased().contains(query)
+                }
+            }
+        }
+        tableView.reloadData()
+        if !filteredIndices.isEmpty {
+            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
+        updateSelectionLabel()
+    }
+
+    @objc private func tableClicked() {
+        if tableView.clickedColumn >= 0 {
+            activeColumn = tableView.clickedColumn
+            updateSelectionLabel()
+        }
+    }
+
+    @objc private func cellDoubleClicked() {
+        let displayRow = tableView.clickedRow
+        let clickedColumn = tableView.clickedColumn >= 0 ? tableView.clickedColumn : activeColumn
+        copyCell(displayRow: displayRow, column: clickedColumn)
+    }
+
+    @objc private func closePicker() {
+        close()
+    }
+
+    private func confirmSelection() {
+        let displayRow = tableView.selectedRow
+        copyCell(displayRow: displayRow, column: activeColumn)
+    }
+
+    private func stepActiveColumn(step: Int) {
+        let maxColumn = max(0, tableView.tableColumns.count - 1)
+        activeColumn = min(maxColumn, max(0, activeColumn + step))
+        updateSelectionLabel()
+    }
+
+    private func copyCell(displayRow: Int, column: Int) {
+        guard displayRow >= 0, displayRow < filteredIndices.count else { return }
+        let sourceRow = filteredIndices[displayRow]
+        let col = min(max(0, column), max(0, tableView.tableColumns.count - 1))
+        let rowCells = rows[sourceRow]
+        let value = col < rowCells.count ? rowCells[col] : ""
+        onCopy(value, sourceRow, col)
+        close()
+    }
+
+    private func updateSelectionLabel() {
+        let rowText: String
+        if tableView.selectedRow >= 0, tableView.selectedRow < filteredIndices.count {
+            rowText = "row \(filteredIndices[tableView.selectedRow] + 1)"
+        } else {
+            rowText = "no row selected"
+        }
+        selectionLabel.stringValue = "Active column: \(activeColumn + 1), \(rowText)"
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        filteredIndices.count
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateSelectionLabel()
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row >= 0, row < filteredIndices.count else { return nil }
+        guard let tableColumn = tableColumn else { return nil }
+
+        let sourceRow = filteredIndices[row]
+        let colIdx = tableView.tableColumns.firstIndex(of: tableColumn) ?? 0
+        let rowCells = rows[sourceRow]
+        let text = colIdx < rowCells.count ? rowCells[colIdx] : ""
+
+        let cell = NSTextField(labelWithString: text)
+        cell.font = NSFont.systemFont(ofSize: 11)
+        cell.lineBreakMode = .byTruncatingTail
+        cell.toolTip = text
+        return cell
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onClose()
     }
 }
 
@@ -1272,50 +1834,63 @@ class PreferencesWindowController: NSWindowController {
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
 
-        let documentView = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 480))
+        let documentView = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 520))
         scrollView.documentView = documentView
         contentView.addSubview(scrollView)
 
-        var yOffset: CGFloat = 450
+        var yOffset: CGFloat = 492
 
         // Section: Text Cleanup
         yOffset = addSectionHeader("Text Cleanup", to: documentView, y: yOffset)
-        yOffset = addToggle("Whitespace & line break cleanup", feature: "whitespace_cleanup", to: documentView, y: yOffset)
-        yOffset = addToggle("Unicode normalization", feature: "normalize_unicode", to: documentView, y: yOffset)
-        yOffset = addToggle("Agent artifact stripping", feature: "agent_strip", to: documentView, y: yOffset)
+        yOffset = addToggle("Clean whitespace and line breaks", feature: "whitespace_cleanup", to: documentView, y: yOffset)
+        yOffset = addToggle("Normalize encoding (quotes, dashes, invisible chars)", feature: "normalize_unicode", to: documentView, y: yOffset)
+        yOffset = addToggle("Remove hidden agent artifacts", feature: "agent_strip", to: documentView, y: yOffset)
         yOffset -= 10
 
         // Section: Formatting
         yOffset = addSectionHeader("Formatting", to: documentView, y: yOffset)
-        yOffset = addToggle("JSON detect & prettify / Table-to-Markdown / Code fence", feature: "structural_detection", to: documentView, y: yOffset)
-        yOffset = addToggle("Backtick auto-wrapper (shell safety risk)", feature: "auto_wrapper", to: documentView, y: yOffset)
+        yOffset = addToggle("Detect and structure JSON/table/code content", feature: "structural_detection", to: documentView, y: yOffset)
+        yOffset = addToggle("Open cell picker when table content is detected", feature: "table_cell_picker", to: documentView, y: yOffset)
+        yOffset = addToggle("Auto-wrap code-like tokens in backticks (shell risk)", feature: "auto_wrapper", to: documentView, y: yOffset)
+        yOffset = addToggle("Apply custom cleanup rules from config", feature: "user_rules", to: documentView, y: yOffset)
         yOffset -= 10
 
         // Section: URLs
         yOffset = addSectionHeader("URLs", to: documentView, y: yOffset)
-        yOffset = addToggle("Strip tracking parameters", feature: "url_cleaning", to: documentView, y: yOffset)
+        yOffset = addToggle("Remove tracking parameters from URLs", feature: "url_cleaning", to: documentView, y: yOffset)
         yOffset -= 10
 
         // Section: Privacy
         yOffset = addSectionHeader("Privacy", to: documentView, y: yOffset)
-        yOffset = addToggle("Sensitive content filter", feature: "sensitive_filter", to: documentView, y: yOffset)
+        yOffset = addToggle("Skip cleanup when sensitive content is detected", feature: "sensitive_filter", to: documentView, y: yOffset)
         yOffset -= 10
 
         // Section: Feedback
         yOffset = addSectionHeader("Feedback", to: documentView, y: yOffset)
         yOffset = addToastPrefControl(to: documentView, y: yOffset)
-        yOffset -= 20
+        let applyHint = NSTextField(labelWithString: "Changes apply immediately")
+        applyHint.font = NSFont.systemFont(ofSize: 10)
+        applyHint.textColor = .tertiaryLabelColor
+        applyHint.frame = NSRect(x: 30, y: 52, width: 220, height: 16)
+        documentView.addSubview(applyHint)
 
         // Buttons
+        let buttonRowY: CGFloat = 12
         let openConfigButton = NSButton(title: "Open Config File", target: self, action: #selector(openConfigFile))
-        openConfigButton.frame = NSRect(x: 20, y: yOffset, width: 150, height: 32)
+        openConfigButton.frame = NSRect(x: 20, y: buttonRowY, width: 150, height: 32)
         openConfigButton.bezelStyle = .rounded
         documentView.addSubview(openConfigButton)
 
         let resetButton = NSButton(title: "Reset to Defaults", target: self, action: #selector(resetToDefaults))
-        resetButton.frame = NSRect(x: 180, y: yOffset, width: 150, height: 32)
+        resetButton.frame = NSRect(x: 180, y: buttonRowY, width: 150, height: 32)
         resetButton.bezelStyle = .rounded
         documentView.addSubview(resetButton)
+
+        let doneButton = NSButton(title: "Done", target: self, action: #selector(closePreferences))
+        doneButton.frame = NSRect(x: 340, y: buttonRowY, width: 70, height: 32)
+        doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\r"
+        documentView.addSubview(doneButton)
     }
 
     private func addSectionHeader(_ title: String, to view: NSView, y: CGFloat) -> CGFloat {
@@ -1373,6 +1948,9 @@ class PreferencesWindowController: NSWindowController {
         }
         if ok {
             log("Preferences: set \(feature) = \(enabled)")
+            if CcvvCore.shared.reloadConfig() {
+                log("Preferences: reloaded active config")
+            }
         }
     }
 
@@ -1399,6 +1977,7 @@ class PreferencesWindowController: NSWindowController {
             # whitespace_cleanup = true
             # agent_strip = true
             # structural_detection = true
+            # table_cell_picker = true
             # url_cleaning = true
             # auto_wrapper = false
             # sensitive_filter = true
@@ -1413,34 +1992,64 @@ class PreferencesWindowController: NSWindowController {
         let configPath = NSHomeDirectory() + "/.ccvv/config.toml"
         try? FileManager.default.removeItem(atPath: configPath)
         log("Preferences: reset to defaults (config file removed)")
+        _ = CcvvCore.shared.reloadConfig()
         // Refresh the window
         if let window = self.window {
             window.contentView?.subviews.forEach { $0.removeFromSuperview() }
             setupUI()
         }
     }
+
+    @objc func closePreferences() {
+        window?.close()
+    }
 }
 
 // MARK: - History View Controller
 
-class HistoryViewController: NSViewController {
+class HistoryViewController: NSViewController, NSMenuItemValidation {
     var tableView: NSTableView!
     var searchField: NSSearchField!
-    var entries: [(preview: String, contentType: String, timestamp: String)] = []
+    var entries: [(preview: String, cleanedText: String, rawText: String?, contentType: String, timestamp: String)] = []
 
     override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 400))
+        let containerWidth: CGFloat = 720
+        let containerHeight: CGFloat = 560
+        let bottomBarHeight: CGFloat = 28
+        let searchHeight: CGFloat = 28
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: containerWidth, height: containerHeight))
         self.view = container
 
         // Search field
-        searchField = NSSearchField(frame: NSRect(x: 10, y: 365, width: 340, height: 28))
+        searchField = NSSearchField(frame: NSRect(x: 10, y: containerHeight - 35, width: containerWidth - 20, height: searchHeight))
         searchField.placeholderString = "Search history..."
         searchField.target = self
         searchField.action = #selector(searchChanged(_:))
         container.addSubview(searchField)
 
+        // Hint label
+        let hintLabel = NSTextField(labelWithString: "Double-click Org icon to copy original · Double-click Cleaned Up to copy cleaned")
+        hintLabel.font = NSFont.systemFont(ofSize: 10)
+        hintLabel.textColor = .tertiaryLabelColor
+        hintLabel.frame = NSRect(x: 10, y: 6, width: containerWidth - 100, height: 16)
+        container.addSubview(hintLabel)
+
+        let doneButton = NSButton(title: "Done", target: self, action: #selector(closeHistoryPopover))
+        doneButton.frame = NSRect(x: containerWidth - 78, y: 2, width: 68, height: 22)
+        doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\r"
+        container.addSubview(doneButton)
+
         // Scroll view with table
-        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 360))
+        let scrollView = NSScrollView(
+            frame: NSRect(
+                x: 0,
+                y: bottomBarHeight,
+                width: containerWidth,
+                height: containerHeight - searchHeight - bottomBarHeight - 10
+            )
+        )
         scrollView.hasVerticalScroller = true
         scrollView.autoresizingMask = [.width, .height]
 
@@ -1448,28 +2057,47 @@ class HistoryViewController: NSViewController {
         tableView.delegate = self
         tableView.dataSource = self
 
+        let rawCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("raw"))
+        rawCol.title = "Org"
+        rawCol.width = 32
+        tableView.addTableColumn(rawCol)
+
         let previewCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("preview"))
-        previewCol.title = "Preview"
-        previewCol.width = 220
+        previewCol.title = "Cleaned Up"
+        previewCol.width = 500
         tableView.addTableColumn(previewCol)
 
         let typeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("type"))
         typeCol.title = "Type"
-        typeCol.width = 50
+        typeCol.width = 70
         tableView.addTableColumn(typeCol)
 
         let timeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
         timeCol.title = "Time"
-        timeCol.width = 60
+        timeCol.width = 90
         tableView.addTableColumn(timeCol)
+
+        tableView.rowHeight = 24
 
         tableView.target = self
         tableView.doubleAction = #selector(rowDoubleClicked)
+
+        // Right-click context menu for copy options
+        let contextMenu = NSMenu()
+        contextMenu.addItem(NSMenuItem(title: "Copy Cleaned", action: #selector(contextCopyCleaned(_:)), keyEquivalent: ""))
+        contextMenu.addItem(NSMenuItem(title: "Copy Original", action: #selector(contextCopyRaw(_:)), keyEquivalent: ""))
+        tableView.menu = contextMenu
 
         scrollView.documentView = tableView
         container.addSubview(scrollView)
 
         loadHistory(query: nil)
+    }
+
+    @objc func closeHistoryPopover() {
+        if let popover = (NSApp.delegate as? AppDelegate)?.historyPopover {
+            popover.close()
+        }
     }
 
     func loadHistory(query: String?) {
@@ -1503,9 +2131,18 @@ class HistoryViewController: NSViewController {
            let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             for item in array {
                 let preview = (item["preview"] as? String) ?? ""
+                let cleaned = (item["cleaned_text"] as? String) ?? preview
+                let raw = item["raw_text"] as? String
                 let ct = (item["content_type"] as? String) ?? "unknown"
-                let ts = (item["created_at"] as? String) ?? ""
-                entries.append((preview: String(preview.prefix(80)), contentType: ct, timestamp: relativeTime(ts)))
+                let ts: String
+                if let epoch = item["created_at"] as? Int {
+                    ts = relativeTimeFromDate(Date(timeIntervalSince1970: TimeInterval(epoch)))
+                } else if let epochDouble = item["created_at"] as? Double {
+                    ts = relativeTimeFromDate(Date(timeIntervalSince1970: epochDouble))
+                } else {
+                    ts = ""
+                }
+                entries.append((preview: String(preview.prefix(80)), cleanedText: cleaned, rawText: raw, contentType: ct, timestamp: ts))
             }
         }
 
@@ -1517,13 +2154,20 @@ class HistoryViewController: NSViewController {
     }
 
     @objc func rowDoubleClicked() {
-        let row = tableView.selectedRow
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
         guard row >= 0, row < entries.count else { return }
-        // Copy the preview text to clipboard (the full cleaned text would require another FFI call)
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(entries[row].preview, forType: .string)
-        log("History: restored entry to clipboard")
+
+        let clickedCol = tableView.clickedColumn
+        if clickedCol >= 0, clickedCol < tableView.tableColumns.count {
+            let columnId = tableView.tableColumns[clickedCol].identifier.rawValue
+            if columnId == "raw" {
+                copyRawEntry(row, source: "double click")
+            } else {
+                copyCleanedEntry(row, source: "double click")
+            }
+        } else {
+            copyCleanedEntry(row, source: "double click")
+        }
 
         // Dismiss the popover
         if let popover = (NSApp.delegate as? AppDelegate)?.historyPopover {
@@ -1557,20 +2201,118 @@ extension HistoryViewController: NSTableViewDataSource, NSTableViewDelegate {
         return entries.count
     }
 
+    func badgeLabel(for contentType: String) -> String {
+        switch contentType.lowercased() {
+        case "prose": return "TEXT"
+        case "mixed": return "TEXT"
+        default: return contentType.uppercased()
+        }
+    }
+
+    func badgeColor(for contentType: String) -> NSColor {
+        switch contentType.lowercased() {
+        case "url": return .systemBlue
+        case "code": return .systemGreen
+        case "json": return .systemOrange
+        case "table": return .systemPurple
+        case "prose", "mixed": return .systemGray
+        default: return .systemGray
+        }
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row < entries.count else { return nil }
         let entry = entries[row]
-        let cell = NSTextField(labelWithString: "")
-        cell.lineBreakMode = .byTruncatingTail
-        cell.font = NSFont.systemFont(ofSize: 11)
 
         switch tableColumn?.identifier.rawValue {
-        case "preview": cell.stringValue = entry.preview
-        case "type": cell.stringValue = entry.contentType
-        case "time": cell.stringValue = entry.timestamp
-        default: break
+        case "type":
+            let wrapper = NSView(frame: NSRect(x: 0, y: 0, width: 50, height: 18))
+            wrapper.wantsLayer = true
+            wrapper.layer?.cornerRadius = 4
+            wrapper.layer?.masksToBounds = true
+            wrapper.layer?.backgroundColor = badgeColor(for: entry.contentType).cgColor
+
+            let label = NSTextField(labelWithString: badgeLabel(for: entry.contentType))
+            label.font = NSFont.systemFont(ofSize: 8, weight: .bold)
+            label.textColor = .white
+            label.alignment = .center
+            label.isBordered = false
+            label.drawsBackground = false
+            label.frame = NSRect(x: 0, y: 1, width: 50, height: 14)
+            wrapper.addSubview(label)
+            return wrapper
+        case "raw":
+            let wrapper = NSView(frame: NSRect(x: 0, y: 0, width: 24, height: 20))
+            wrapper.toolTip = entry.rawText != nil ? "copy original version" : "Original text not available"
+            let imageView = NSImageView(frame: NSRect(x: 4, y: 2, width: 16, height: 16))
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.contentTintColor = entry.rawText != nil ? .secondaryLabelColor : .quaternaryLabelColor
+            imageView.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "Original")
+            imageView.toolTip = wrapper.toolTip
+            wrapper.addSubview(imageView)
+            return wrapper
+        default:
+            let cell = NSTextField(labelWithString: "")
+            cell.lineBreakMode = .byTruncatingTail
+            cell.font = NSFont.systemFont(ofSize: 11)
+            switch tableColumn?.identifier.rawValue {
+            case "preview":
+                cell.stringValue = entry.preview
+                cell.toolTip = entry.cleanedText
+            case "time": cell.stringValue = entry.timestamp
+            default: break
+            }
+            return cell
         }
-        return cell
+    }
+
+    func copyCleanedEntry(_ row: Int, source: String) {
+        guard row >= 0, row < entries.count else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(entries[row].cleanedText, forType: .string)
+        log("History: copied cleaned text via \(source)")
+    }
+
+    func copyRawEntry(_ row: Int, source: String) {
+        guard row >= 0, row < entries.count else { return }
+        guard let raw = entries[row].rawText else {
+            log("History: no raw text available for row \(row)")
+            return
+        }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(raw, forType: .string)
+        log("History: copied original text via \(source)")
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(contextCopyRaw(_:)) {
+            let row = tableView.clickedRow
+            guard row >= 0, row < entries.count else { return false }
+            return entries[row].rawText != nil
+        }
+        if menuItem.action == #selector(contextCopyCleaned(_:)) {
+            let row = tableView.clickedRow
+            return row >= 0 && row < entries.count
+        }
+        return true
+    }
+
+    @objc func contextCopyCleaned(_ sender: NSMenuItem) {
+        let row = tableView.clickedRow
+        copyCleanedEntry(row, source: "context menu")
+        if let popover = (NSApp.delegate as? AppDelegate)?.historyPopover {
+            popover.close()
+        }
+    }
+
+    @objc func contextCopyRaw(_ sender: NSMenuItem) {
+        let row = tableView.clickedRow
+        copyRawEntry(row, source: "context menu")
+        if let popover = (NSApp.delegate as? AppDelegate)?.historyPopover {
+            popover.close()
+        }
     }
 }
 

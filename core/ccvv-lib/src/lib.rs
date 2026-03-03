@@ -12,6 +12,7 @@ pub mod ffi;
 pub mod history;
 pub mod pipeline;
 pub mod secrets;
+pub mod table_extract;
 pub mod transforms;
 
 // Re-export key types for convenience.

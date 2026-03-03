@@ -10,34 +10,34 @@ use super::{RuleFired, Transform, TransformContext};
 /// Common mojibake patterns: (mojibake sequence, correct character).
 /// These are Latin-1-as-UTF-8 double-encoding patterns.
 const MOJIBAKE_TABLE: &[(&str, &str)] = &[
-    ("\u{00C3}\u{00A9}", "\u{00E9}"),   // Ã© → é
-    ("\u{00C3}\u{00BC}", "\u{00FC}"),   // Ã¼ → ü
-    ("\u{00C3}\u{00B6}", "\u{00F6}"),   // Ã¶ → ö
-    ("\u{00C3}\u{00A4}", "\u{00E4}"),   // Ã¤ → ä
-    ("\u{00C3}\u{00A8}", "\u{00E8}"),   // Ã¨ → è
-    ("\u{00C3}\u{00AA}", "\u{00EA}"),   // Ã© → ê
-    ("\u{00C3}\u{00AB}", "\u{00EB}"),   // Ã« → ë
-    ("\u{00C3}\u{00AF}", "\u{00EF}"),   // Ã¯ → ï
-    ("\u{00C3}\u{00B4}", "\u{00F4}"),   // Ã´ → ô
-    ("\u{00C3}\u{00BB}", "\u{00FB}"),   // Ã» → û
-    ("\u{00C3}\u{00A7}", "\u{00E7}"),   // Ã§ → ç
-    ("\u{00C3}\u{00A0}", "\u{00E0}"),   // Ã  → à
-    ("\u{00C3}\u{00A2}", "\u{00E2}"),   // Ã¢ → â
-    ("\u{00C3}\u{00AE}", "\u{00EE}"),   // Ã® → î
-    ("\u{00C3}\u{00B1}", "\u{00F1}"),   // Ã± → ñ
-    ("\u{00C3}\u{0089}", "\u{00C9}"),   // Ã‰ → É
-    ("\u{00C3}\u{0080}", "\u{00C0}"),   // Ã€ → À
-    ("\u{00C3}\u{009C}", "\u{00DC}"),   // Ãœ → Ü
-    ("\u{00C3}\u{0096}", "\u{00D6}"),   // Ã– → Ö
-    ("\u{00C3}\u{0084}", "\u{00C4}"),   // Ã„ → Ä
-    ("\u{00C2}\u{00A0}", "\u{00A0}"),   // Â  → NBSP (then normalized to space below)
-    ("\u{00C2}\u{00AB}", "\u{00AB}"),   // Â« → «
-    ("\u{00C2}\u{00BB}", "\u{00BB}"),   // Â» → »
-    ("\u{00C2}\u{00B0}", "\u{00B0}"),   // Â° → °
-    ("\u{00C2}\u{00A3}", "\u{00A3}"),   // Â£ → £
-    ("\u{00C2}\u{00A5}", "\u{00A5}"),   // Â¥ → ¥
-    ("\u{00C2}\u{00A9}", "\u{00A9}"),   // Â© → ©
-    ("\u{00C2}\u{00AE}", "\u{00AE}"),   // Â® → ®
+    ("\u{00C3}\u{00A9}", "\u{00E9}"),         // Ã© → é
+    ("\u{00C3}\u{00BC}", "\u{00FC}"),         // Ã¼ → ü
+    ("\u{00C3}\u{00B6}", "\u{00F6}"),         // Ã¶ → ö
+    ("\u{00C3}\u{00A4}", "\u{00E4}"),         // Ã¤ → ä
+    ("\u{00C3}\u{00A8}", "\u{00E8}"),         // Ã¨ → è
+    ("\u{00C3}\u{00AA}", "\u{00EA}"),         // Ã© → ê
+    ("\u{00C3}\u{00AB}", "\u{00EB}"),         // Ã« → ë
+    ("\u{00C3}\u{00AF}", "\u{00EF}"),         // Ã¯ → ï
+    ("\u{00C3}\u{00B4}", "\u{00F4}"),         // Ã´ → ô
+    ("\u{00C3}\u{00BB}", "\u{00FB}"),         // Ã» → û
+    ("\u{00C3}\u{00A7}", "\u{00E7}"),         // Ã§ → ç
+    ("\u{00C3}\u{00A0}", "\u{00E0}"),         // Ã  → à
+    ("\u{00C3}\u{00A2}", "\u{00E2}"),         // Ã¢ → â
+    ("\u{00C3}\u{00AE}", "\u{00EE}"),         // Ã® → î
+    ("\u{00C3}\u{00B1}", "\u{00F1}"),         // Ã± → ñ
+    ("\u{00C3}\u{0089}", "\u{00C9}"),         // Ã‰ → É
+    ("\u{00C3}\u{0080}", "\u{00C0}"),         // Ã€ → À
+    ("\u{00C3}\u{009C}", "\u{00DC}"),         // Ãœ → Ü
+    ("\u{00C3}\u{0096}", "\u{00D6}"),         // Ã– → Ö
+    ("\u{00C3}\u{0084}", "\u{00C4}"),         // Ã„ → Ä
+    ("\u{00C2}\u{00A0}", "\u{00A0}"),         // Â  → NBSP (then normalized to space below)
+    ("\u{00C2}\u{00AB}", "\u{00AB}"),         // Â« → «
+    ("\u{00C2}\u{00BB}", "\u{00BB}"),         // Â» → »
+    ("\u{00C2}\u{00B0}", "\u{00B0}"),         // Â° → °
+    ("\u{00C2}\u{00A3}", "\u{00A3}"),         // Â£ → £
+    ("\u{00C2}\u{00A5}", "\u{00A5}"),         // Â¥ → ¥
+    ("\u{00C2}\u{00A9}", "\u{00A9}"),         // Â© → ©
+    ("\u{00C2}\u{00AE}", "\u{00AE}"),         // Â® → ®
     ("\u{00E2}\u{0080}\u{0099}", "\u{2019}"), // â€™ → ' (right single quote, will be normalized below)
     ("\u{00E2}\u{0080}\u{009C}", "\u{201C}"), // â€œ → " (left double quote, will be normalized below)
     ("\u{00E2}\u{0080}\u{009D}", "\u{201D}"), // â€ → " (right double quote, will be normalized below)
@@ -45,20 +45,21 @@ const MOJIBAKE_TABLE: &[(&str, &str)] = &[
 
 /// Unicode normalization transform (Stage 2).
 pub struct NormalizeTransform {
-    /// If true, replace em-dash with "--". If false, preserve.
-    pub replace_em_dash: bool,
+    /// Em-dash replacement string. Empty string means preserve em-dash as-is.
+    pub em_dash_replacement: String,
 }
 
 impl NormalizeTransform {
     pub fn new() -> Self {
         NormalizeTransform {
-            replace_em_dash: true,
+            em_dash_replacement: "--".to_string(),
         }
     }
 
-    /// Create with custom em-dash replacement setting.
-    pub fn with_em_dash_replacement(mut self, replace: bool) -> Self {
-        self.replace_em_dash = replace;
+    /// Create with custom em-dash replacement string.
+    /// Use an empty string to preserve em-dashes unchanged.
+    pub fn with_em_dash_replacement(mut self, replacement: &str) -> Self {
+        self.em_dash_replacement = replacement.to_string();
         self
     }
 }
@@ -82,7 +83,7 @@ impl Transform for NormalizeTransform {
         result = repair_mojibake(&result, ctx);
 
         // Step 2: Character-by-character normalization
-        result = normalize_characters(&result, self.replace_em_dash);
+        result = normalize_characters(&result, &self.em_dash_replacement);
 
         // Step 3: NFC normalization
         result = result.nfc().collect::<String>();
@@ -91,7 +92,11 @@ impl Transform for NormalizeTransform {
             original_len.abs_diff(result.len())
         } else {
             // Check if content actually changed even if length is same
-            if result != input { 1 } else { 0 }
+            if result != input {
+                1
+            } else {
+                0
+            }
         };
 
         if chars_changed > 0 {
@@ -144,7 +149,7 @@ fn repair_mojibake(input: &str, ctx: &mut TransformContext) -> String {
 }
 
 /// Normalize individual characters.
-fn normalize_characters(input: &str, replace_em_dash: bool) -> String {
+fn normalize_characters(input: &str, em_dash_replacement: &str) -> String {
     let mut result = String::with_capacity(input.len());
 
     for ch in input.chars() {
@@ -153,10 +158,10 @@ fn normalize_characters(input: &str, replace_em_dash: bool) -> String {
             '\u{201C}' | '\u{201D}' => result.push('"'),
             // Curly single quotes → straight
             '\u{2018}' | '\u{2019}' => result.push('\''),
-            // Em-dash → configurable
+            // Em-dash → configurable replacement
             '\u{2014}' => {
-                if replace_em_dash {
-                    result.push_str("--");
+                if !em_dash_replacement.is_empty() {
+                    result.push_str(em_dash_replacement);
                 } else {
                     result.push(ch);
                 }
@@ -207,7 +212,16 @@ mod tests {
     fn test_em_dash_preserved() {
         let input = "Hello\u{2014}World";
         let mut ctx = TransformContext::default();
-        let transform = NormalizeTransform::new().with_em_dash_replacement(false);
+        let transform = NormalizeTransform::new().with_em_dash_replacement("");
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, "Hello\u{2014}World");
+    }
+
+    #[test]
+    fn test_em_dash_custom_replacement() {
+        let input = "Hello\u{2014}World";
+        let mut ctx = TransformContext::default();
+        let transform = NormalizeTransform::new().with_em_dash_replacement("\u{2014}");
         let result = transform.apply(input, &mut ctx);
         assert_eq!(result, "Hello\u{2014}World");
     }

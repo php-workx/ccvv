@@ -198,7 +198,9 @@ fn cmd_doctor(cli: &Cli) {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(&home).join(".ccvv").join("config.toml")
+            std::path::PathBuf::from(&home)
+                .join(".ccvv")
+                .join("config.toml")
         });
     println!("Config path: {:?}", config_path);
     println!(
@@ -226,7 +228,9 @@ fn cmd_doctor(cli: &Cli) {
 
     // Feature states
     let config = load_config(
-        cli.config.as_ref().map(|p| std::path::Path::new(p.as_str())),
+        cli.config
+            .as_ref()
+            .map(|p| std::path::Path::new(p.as_str())),
     )
     .unwrap_or_default();
     let resolved = resolve_config(&config, cli.profile.as_deref()).unwrap_or_default();
@@ -309,7 +313,9 @@ fn cmd_doctor(cli: &Cli) {
     println!();
     println!("WARNING: ccvv never makes network connections.");
     if !resolved.settings.sensitive_filter {
-        println!("WARNING: Sensitive content filter is DISABLED. Secret content may be transformed.");
+        println!(
+            "WARNING: Sensitive content filter is DISABLED. Secret content may be transformed."
+        );
     }
 }
 
@@ -321,7 +327,9 @@ fn cmd_validate(cli: &Cli) {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(&home).join(".ccvv").join("config.toml")
+            std::path::PathBuf::from(&home)
+                .join(".ccvv")
+                .join("config.toml")
         });
 
     if !config_path.exists() {
@@ -370,7 +378,9 @@ fn read_stdin() -> String {
 fn build_pipeline(cli: &Cli) -> Pipeline {
     // Load config
     let config = load_config(
-        cli.config.as_ref().map(|p| std::path::Path::new(p.as_str())),
+        cli.config
+            .as_ref()
+            .map(|p| std::path::Path::new(p.as_str())),
     )
     .unwrap_or_default();
     let resolved = resolve_config(&config, cli.profile.as_deref()).unwrap_or_default();
