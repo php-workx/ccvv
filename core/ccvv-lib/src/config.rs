@@ -472,8 +472,8 @@ fn validate_settings_ranges(settings: &Settings) -> Vec<String> {
     if !(0.0..=1.0).contains(&settings.table_cell_picker_min_confidence) {
         errors.push("table_cell_picker_min_confidence must be between 0.0 and 1.0".to_string());
     }
-    if let DoubleTapSetting::Fixed(ms) = settings.double_tap_window_ms {
-        if !(100..=2000).contains(&ms) {
+    if let DoubleTapSetting::Fixed(ms) = &settings.double_tap_window_ms {
+        if !(100..=2000).contains(ms) {
             errors.push("double_tap_window_ms must be between 100 and 2000".to_string());
         }
     }
