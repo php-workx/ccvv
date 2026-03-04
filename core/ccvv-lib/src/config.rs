@@ -300,36 +300,32 @@ pub fn resolve_config(
     let mut settings = config.settings.clone();
 
     // Apply profile overlay if specified
+    macro_rules! apply_overlay {
+        ($settings:expr, $overlay:expr, $($field:ident),+ $(,)?) => {
+            $(
+                if let Some(v) = $overlay.$field {
+                    $settings.$field = v;
+                }
+            )+
+        };
+    }
+
     if let Some(profile_name) = profile {
         if let Some(profiles) = &config.profiles {
             if let Some(overlay) = profiles.get(profile_name) {
-                if let Some(v) = overlay.normalize_unicode {
-                    settings.normalize_unicode = v;
-                }
-                if let Some(v) = overlay.whitespace_cleanup {
-                    settings.whitespace_cleanup = v;
-                }
-                if let Some(v) = overlay.agent_strip {
-                    settings.agent_strip = v;
-                }
-                if let Some(v) = overlay.structural_detection {
-                    settings.structural_detection = v;
-                }
-                if let Some(v) = overlay.url_cleaning {
-                    settings.url_cleaning = v;
-                }
-                if let Some(v) = overlay.table_cell_picker {
-                    settings.table_cell_picker = v;
-                }
-                if let Some(v) = overlay.auto_wrapper {
-                    settings.auto_wrapper = v;
-                }
-                if let Some(v) = overlay.user_rules {
-                    settings.user_rules = v;
-                }
-                if let Some(v) = overlay.sensitive_filter {
-                    settings.sensitive_filter = v;
-                }
+                apply_overlay!(
+                    settings,
+                    overlay,
+                    normalize_unicode,
+                    whitespace_cleanup,
+                    agent_strip,
+                    structural_detection,
+                    url_cleaning,
+                    table_cell_picker,
+                    auto_wrapper,
+                    user_rules,
+                    sensitive_filter,
+                );
             } else {
                 return Err(CcvvError::Config(format!(
                     "Profile '{}' not found in config",

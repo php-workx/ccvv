@@ -3,6 +3,8 @@
 //! Applies compiled user rules in declaration order with per-rule timeout.
 //! See §5.4 Stage 8 of the technical spec.
 
+use std::borrow::Cow;
+
 use regex::Regex;
 use std::time::{Duration, Instant};
 
@@ -57,29 +59,28 @@ impl Transform for UserRulesTransform {
 
         for rule in &self.rules {
             let start = Instant::now();
-            let before = text.clone();
             let result = rule.regex.replace_all(&text, rule.replacement.as_str());
 
             if start.elapsed() > RULE_TIMEOUT {
-                // Rule timed out — revert to input for this rule
                 ctx.rules_fired.push(RuleFired {
                     stage: "user_rules",
                     description: format!("rule '{}' timed out after {:?}", rule.name, RULE_TIMEOUT),
                     chars_changed: 0,
                 });
-                text = before;
                 continue;
             }
 
-            let new_text = result.to_string();
-            if new_text != before {
-                let chars_changed = before.len().abs_diff(new_text.len());
-                ctx.rules_fired.push(RuleFired {
-                    stage: "user_rules",
-                    description: format!("rule '{}' fired", rule.name),
-                    chars_changed,
-                });
-                text = new_text;
+            match result {
+                Cow::Borrowed(_) => {}
+                Cow::Owned(new_text) => {
+                    let chars_changed = text.len().abs_diff(new_text.len());
+                    ctx.rules_fired.push(RuleFired {
+                        stage: "user_rules",
+                        description: format!("rule '{}' fired", rule.name),
+                        chars_changed,
+                    });
+                    text = new_text;
+                }
             }
         }
 

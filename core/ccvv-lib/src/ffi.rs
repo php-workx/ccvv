@@ -358,6 +358,62 @@ pub unsafe extern "C" fn ccvv_validate_config(
 
 // --- Config write functions (pre-mortem fix: BLOCKER 2) ---
 
+/// Read a TOML config, apply a mutation to the `[settings]` table, and
+/// atomically write back (temp + fsync + rename + 0600 permissions).
+fn config_read_modify_write<F>(path: &std::path::Path, mutate: F) -> Result<(), String>
+where
+    F: FnOnce(&mut toml_edit::DocumentMut),
+{
+    let content = if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| format!("read error: {}", e))?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
+        .map_err(|e| format!("toml parse error: {}", e))?;
+
+    if doc.get("settings").is_none() {
+        doc["settings"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+
+    mutate(&mut doc);
+
+    let tmp_path = path.with_extension("toml.tmp");
+    let content_bytes = doc.to_string();
+    let file =
+        std::fs::File::create(&tmp_path).map_err(|e| format!("create tmp error: {}", e))?;
+    {
+        use std::io::Write;
+        let mut writer = std::io::BufWriter::new(file);
+        writer.write_all(content_bytes.as_bytes()).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("write error: {}", e)
+        })?;
+        let file = writer.into_inner().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("flush error: {}", e)
+        })?;
+        file.sync_all().map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!("sync error: {}", e)
+        })?;
+    }
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("rename error: {}", e)
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(())
+}
+
 /// Set a boolean config key. Uses toml_edit for round-trip safe writes.
 ///
 /// # Safety
@@ -379,76 +435,12 @@ pub unsafe extern "C" fn ccvv_config_set_bool(
     };
 
     let path = std::path::Path::new(path_str);
-    let content = if path.exists() {
-        match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                unsafe { set_error(error_out, &format!("read error: {}", e)) };
-                return false;
-            }
-        }
-    } else {
-        String::new()
-    };
-
-    let mut doc = match content.parse::<toml_edit::DocumentMut>() {
-        Ok(d) => d,
-        Err(e) => {
-            unsafe { set_error(error_out, &format!("toml parse error: {}", e)) };
-            return false;
-        }
-    };
-
-    // Ensure [settings] table exists
-    if doc.get("settings").is_none() {
-        doc["settings"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    doc["settings"][key_str] = toml_edit::value(value);
-
-    // Atomic write: temp → fsync → rename
-    let tmp_path = path.with_extension("toml.tmp");
-    let content_bytes = doc.to_string();
-    let file = match std::fs::File::create(&tmp_path) {
-        Ok(f) => f,
-        Err(e) => {
-            unsafe { set_error(error_out, &format!("create tmp error: {}", e)) };
-            return false;
-        }
-    };
-    {
-        use std::io::Write;
-        let mut writer = std::io::BufWriter::new(file);
-        if let Err(e) = writer.write_all(content_bytes.as_bytes()) {
-            unsafe { set_error(error_out, &format!("write error: {}", e)) };
-            let _ = std::fs::remove_file(&tmp_path);
-            return false;
-        }
-        let file = match writer.into_inner() {
-            Ok(f) => f,
-            Err(e) => {
-                unsafe { set_error(error_out, &format!("flush error: {}", e)) };
-                let _ = std::fs::remove_file(&tmp_path);
-                return false;
-            }
-        };
-        if let Err(e) = file.sync_all() {
-            unsafe { set_error(error_out, &format!("sync error: {}", e)) };
-            let _ = std::fs::remove_file(&tmp_path);
-            return false;
-        }
-    }
-    match std::fs::rename(&tmp_path, path) {
-        Ok(()) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-            }
-            true
-        }
-        Err(e) => {
-            unsafe { set_error(error_out, &format!("rename error: {}", e)) };
-            let _ = std::fs::remove_file(&tmp_path);
+    match config_read_modify_write(path, |doc| {
+        doc["settings"][key_str] = toml_edit::value(value);
+    }) {
+        Ok(()) => true,
+        Err(msg) => {
+            unsafe { set_error(error_out, &msg) };
             false
         }
     }
@@ -479,75 +471,12 @@ pub unsafe extern "C" fn ccvv_config_set_string(
     };
 
     let path = std::path::Path::new(path_str);
-    let content = if path.exists() {
-        match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                unsafe { set_error(error_out, &format!("read error: {}", e)) };
-                return false;
-            }
-        }
-    } else {
-        String::new()
-    };
-
-    let mut doc = match content.parse::<toml_edit::DocumentMut>() {
-        Ok(d) => d,
-        Err(e) => {
-            unsafe { set_error(error_out, &format!("toml parse error: {}", e)) };
-            return false;
-        }
-    };
-
-    if doc.get("settings").is_none() {
-        doc["settings"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    doc["settings"][key_str] = toml_edit::value(value_str);
-
-    // Atomic write: temp → fsync → rename
-    let tmp_path = path.with_extension("toml.tmp");
-    let content_bytes = doc.to_string();
-    let file = match std::fs::File::create(&tmp_path) {
-        Ok(f) => f,
-        Err(e) => {
-            unsafe { set_error(error_out, &format!("create tmp error: {}", e)) };
-            return false;
-        }
-    };
-    {
-        use std::io::Write;
-        let mut writer = std::io::BufWriter::new(file);
-        if let Err(e) = writer.write_all(content_bytes.as_bytes()) {
-            unsafe { set_error(error_out, &format!("write error: {}", e)) };
-            let _ = std::fs::remove_file(&tmp_path);
-            return false;
-        }
-        let file = match writer.into_inner() {
-            Ok(f) => f,
-            Err(e) => {
-                unsafe { set_error(error_out, &format!("flush error: {}", e)) };
-                let _ = std::fs::remove_file(&tmp_path);
-                return false;
-            }
-        };
-        if let Err(e) = file.sync_all() {
-            unsafe { set_error(error_out, &format!("sync error: {}", e)) };
-            let _ = std::fs::remove_file(&tmp_path);
-            return false;
-        }
-    }
-    match std::fs::rename(&tmp_path, path) {
-        Ok(()) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-            }
-            true
-        }
-        Err(e) => {
-            unsafe { set_error(error_out, &format!("rename error: {}", e)) };
-            let _ = std::fs::remove_file(&tmp_path);
+    match config_read_modify_write(path, |doc| {
+        doc["settings"][key_str] = toml_edit::value(value_str);
+    }) {
+        Ok(()) => true,
+        Err(msg) => {
+            unsafe { set_error(error_out, &msg) };
             false
         }
     }
@@ -799,13 +728,12 @@ static TIMING_SAMPLES: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// Record a timing sample (interval in ms between double-taps).
 #[no_mangle]
 pub extern "C" fn ccvv_timing_record_sample(interval_ms: u32) {
-    if let Ok(mut samples) = TIMING_SAMPLES.lock() {
-        samples.push(interval_ms);
-        // Keep only last 100 samples
-        if samples.len() > 100 {
-            let excess = samples.len() - 100;
-            samples.drain(..excess);
-        }
+    let mut samples = TIMING_SAMPLES.lock().expect("TIMING_SAMPLES mutex poisoned");
+    samples.push(interval_ms);
+    // Keep only last 100 samples
+    if samples.len() > 100 {
+        let excess = samples.len() - 100;
+        samples.drain(..excess);
     }
 }
 
@@ -813,18 +741,15 @@ pub extern "C" fn ccvv_timing_record_sample(interval_ms: u32) {
 /// Returns 0 if not enough samples to compute (falls back to config).
 #[no_mangle]
 pub extern "C" fn ccvv_timing_get_threshold_ms() -> u32 {
-    if let Ok(samples) = TIMING_SAMPLES.lock() {
-        if samples.len() < 10 {
-            return 0;
-        }
-        // Use 90th percentile of recorded intervals
-        let mut sorted: Vec<u32> = samples.clone();
-        sorted.sort();
-        let idx = (sorted.len() * 90) / 100;
-        sorted.get(idx).copied().unwrap_or(0)
-    } else {
-        0
+    let samples = TIMING_SAMPLES.lock().expect("TIMING_SAMPLES mutex poisoned");
+    if samples.len() < 10 {
+        return 0;
     }
+    // Use 90th percentile of recorded intervals
+    let mut sorted: Vec<u32> = samples.clone();
+    sorted.sort();
+    let idx = (sorted.len() * 90) / 100;
+    sorted.get(idx).copied().unwrap_or(0)
 }
 
 // --- Result builder helpers ---
@@ -845,6 +770,10 @@ fn build_transform_result(
     }
 }
 
+/// Map a transform stage name to a user-facing HUD action label.
+///
+/// Stage names must match the `Transform::name()` return values
+/// (e.g. `"normalize_unicode"`, `"whitespace_cleanup"`).
 fn action_label_for_stage(stage: &str) -> &'static str {
     match stage {
         "normalize_unicode" => "Normalized text formatting",

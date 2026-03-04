@@ -76,11 +76,10 @@ impl Transform for NormalizeTransform {
     }
 
     fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
-        let mut result = input.to_string();
-        let original_len = result.len();
+        let original_len = input.len();
 
         // Step 1: Mojibake repair (paragraph-aware, threshold of 3)
-        result = repair_mojibake(&result, ctx);
+        let mut result = repair_mojibake(input, ctx);
 
         // Step 2: Character-by-character normalization
         result = normalize_characters(&result, &self.em_dash_replacement);

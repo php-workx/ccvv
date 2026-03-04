@@ -82,6 +82,11 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
 cp Info.plist "$APP_BUNDLE/Contents/"
+if [[ -f "$SCRIPT_DIR/assets/ccvv.icns" ]]; then
+    cp "$SCRIPT_DIR/assets/ccvv.icns" "$APP_BUNDLE/Contents/Resources/ccvv.icns"
+else
+    echo "Warning: icon asset missing at $SCRIPT_DIR/assets/ccvv.icns"
+fi
 
 echo "Signing..."
 # Prefer Developer ID (distributable), fall back to Apple Development, then ad-hoc

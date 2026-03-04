@@ -3,6 +3,8 @@
 //! Three sub-detectors tried in order: JSON, table, code fence.
 //! See §5.4 Stage 5 of the technical spec.
 
+use crate::table_extract::split_csv_line;
+
 use super::{ContentType, RuleFired, Transform, TransformContext};
 
 /// Structural detection transform (Stage 5).
@@ -137,7 +139,7 @@ impl StructuralTransform {
         let col_counts: Vec<usize> = split_lines.iter().map(|row| row.len()).collect();
 
         // Find the most common column count
-        let mut freq: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut freq = std::collections::HashMap::<usize, usize>::new();
         for &count in &col_counts {
             *freq.entry(count).or_insert(0) += 1;
         }
@@ -169,8 +171,7 @@ impl StructuralTransform {
         // Header inference: first row is header if values are distinct and < 80% numeric
         let header = &rows[0];
         let is_header = {
-            let unique: std::collections::HashSet<&str> =
-                header.iter().map(|s| s.as_str()).collect();
+            let unique: std::collections::HashSet<&str> = header.iter().map(|s| s.as_str()).collect();
             let distinct = unique.len() == header.len();
             let numeric_count = header
                 .iter()
@@ -289,39 +290,6 @@ impl StructuralTransform {
 
         Some(format!("```{}\n{}\n```", lang_hint, input))
     }
-}
-
-/// Split a CSV/TSV line respecting RFC 4180 quoted fields.
-fn split_csv_line(line: &str, delimiter: char) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if in_quotes {
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    // Escaped quote
-                    current.push('"');
-                    chars.next();
-                } else {
-                    in_quotes = false;
-                }
-            } else {
-                current.push(ch);
-            }
-        } else if ch == '"' {
-            in_quotes = true;
-        } else if ch == delimiter {
-            fields.push(current.clone());
-            current.clear();
-        } else {
-            current.push(ch);
-        }
-    }
-    fields.push(current);
-    fields
 }
 
 /// Detect programming language from keyword frequency.

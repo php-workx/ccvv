@@ -78,15 +78,15 @@ impl Pipeline {
             return (input.to_string(), ctx);
         }
 
+        let original_len = input.len();
         let mut text = input.to_string();
 
         for stage in &self.stages {
-            let input_len = text.len();
             text = stage.apply(&text, &mut ctx);
 
-            // Inter-stage output size check: abort if expansion exceeds ratio
-            if input_len > 0 {
-                let ratio = text.len() as f64 / input_len as f64;
+            // Cumulative expansion check against original input size
+            if original_len > 0 {
+                let ratio = text.len() as f64 / original_len as f64;
                 if ratio > self.max_output_ratio {
                     return (input.to_string(), ctx);
                 }
@@ -115,15 +115,16 @@ impl Pipeline {
             return (input.to_string(), ctx);
         }
 
+        let original_len = input.len();
         let mut text = input.to_string();
 
         for stage in &self.stages {
             if stage_names.contains(&stage.name()) {
-                let input_len = text.len();
                 text = stage.apply(&text, &mut ctx);
 
-                if input_len > 0 {
-                    let ratio = text.len() as f64 / input_len as f64;
+                // Cumulative expansion check against original input size
+                if original_len > 0 {
+                    let ratio = text.len() as f64 / original_len as f64;
                     if ratio > self.max_output_ratio {
                         return (input.to_string(), ctx);
                     }
@@ -238,6 +239,22 @@ mod tests {
         let pipeline = Pipeline::new(vec![Box::new(DoublerTransform)]);
         // Request a stage that doesn't exist — doubler should be skipped
         let (result, _ctx) = pipeline.run_selective("hello", &["nonexistent"]);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_cumulative_expansion_guard() {
+        // Two doublers: stage1 produces 2x, stage2 produces 4x from original.
+        // With max_output_ratio=3.0, the first doubler passes (2x <= 3.0)
+        // but the second should trip it (4x > 3.0).
+        let pipeline = Pipeline::new(vec![
+            Box::new(DoublerTransform),
+            Box::new(DoublerTransform),
+        ])
+        .with_max_output_ratio(3.0);
+        let input = "hello";
+        let (result, _ctx) = pipeline.run(input);
+        // Should return original since cumulative expansion (4x) exceeds 3.0x
         assert_eq!(result, "hello");
     }
 

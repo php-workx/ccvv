@@ -725,7 +725,7 @@ class CcvvCore {
 
 // MARK: - App Delegate
 
-let appVersion = "1.2.0"
+let appVersion = "1.3"
 
 let logFile: FileHandle? = {
     let path = NSHomeDirectory() + "/Library/Logs/ccvv.log"
@@ -2015,7 +2015,7 @@ class HistoryViewController: NSViewController, NSMenuItemValidation {
     override func loadView() {
         let containerWidth: CGFloat = 720
         let containerHeight: CGFloat = 560
-        let bottomBarHeight: CGFloat = 28
+        let bottomBarHeight: CGFloat = 36
         let searchHeight: CGFloat = 28
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: containerWidth, height: containerHeight))
@@ -2032,11 +2032,11 @@ class HistoryViewController: NSViewController, NSMenuItemValidation {
         let hintLabel = NSTextField(labelWithString: "Double-click Org icon to copy original · Double-click Cleaned Up to copy cleaned")
         hintLabel.font = NSFont.systemFont(ofSize: 10)
         hintLabel.textColor = .tertiaryLabelColor
-        hintLabel.frame = NSRect(x: 10, y: 6, width: containerWidth - 100, height: 16)
+        hintLabel.frame = NSRect(x: 10, y: 11, width: containerWidth - 110, height: 16)
         container.addSubview(hintLabel)
 
         let doneButton = NSButton(title: "Done", target: self, action: #selector(closeHistoryPopover))
-        doneButton.frame = NSRect(x: containerWidth - 78, y: 2, width: 68, height: 22)
+        doneButton.frame = NSRect(x: containerWidth - 82, y: 7, width: 72, height: 24)
         doneButton.bezelStyle = .rounded
         doneButton.keyEquivalent = "\r"
         container.addSubview(doneButton)
@@ -2059,12 +2059,12 @@ class HistoryViewController: NSViewController, NSMenuItemValidation {
 
         let rawCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("raw"))
         rawCol.title = "Org"
-        rawCol.width = 32
+        rawCol.width = 26
         tableView.addTableColumn(rawCol)
 
         let previewCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("preview"))
         previewCol.title = "Cleaned Up"
-        previewCol.width = 500
+        previewCol.width = 468
         tableView.addTableColumn(previewCol)
 
         let typeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("type"))
@@ -2074,7 +2074,7 @@ class HistoryViewController: NSViewController, NSMenuItemValidation {
 
         let timeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
         timeCol.title = "Time"
-        timeCol.width = 90
+        timeCol.width = 128
         tableView.addTableColumn(timeCol)
 
         tableView.rowHeight = 24

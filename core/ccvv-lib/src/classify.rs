@@ -5,6 +5,7 @@
 //! See §7 of the technical spec.
 
 use crate::transforms::ContentType;
+use crate::table_extract::extract_table;
 
 /// Classify the content type of the given text.
 pub fn classify(text: &str) -> ContentType {
@@ -15,28 +16,20 @@ pub fn classify(text: &str) -> ContentType {
         return ContentType::Json;
     }
 
+    // Table detection (robust): terminal/pipe/markdown/delimiter formats
+    if extract_table(trimmed).detected {
+        return ContentType::Table;
+    }
+
     // Single URL check
-    if trimmed.lines().count() == 1
+    if !trimmed.contains('\n')
         && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
         && !trimmed.contains(' ')
     {
         return ContentType::Url;
     }
 
-    // Table detection: check for consistent delimiter-separated values
     let lines: Vec<&str> = trimmed.lines().collect();
-    if lines.len() >= 2 {
-        for delimiter in ['\t', ',', ';'] {
-            let counts: Vec<usize> = lines.iter().map(|l| l.matches(delimiter).count()).collect();
-            if let Some(&first) = counts.first() {
-                if first >= 1
-                    && counts.iter().filter(|&&c| c == first).count() * 100 / counts.len() >= 80
-                {
-                    return ContentType::Table;
-                }
-            }
-        }
-    }
 
     // Code detection: high indentation ratio or shebang
     if lines.len() > 3 {
@@ -84,6 +77,21 @@ mod tests {
     fn test_classify_table() {
         let tsv = "Name\tAge\nAlice\t30\nBob\t25";
         assert_eq!(classify(tsv), ContentType::Table);
+    }
+
+    #[test]
+    fn test_classify_table_aligned_pipe_block() {
+        let block = "│ Memory snapshot    │ @modal.enter snapshot may become  │ [M] Periodic forced re-snapshot │\n\
+                     │ drift              │ stale, causing subtle bugs after  │ Test snapshot restore            │\n\
+                     │                    │ Modal infra updates               │                                  │";
+        assert_eq!(classify(block), ContentType::Table);
+    }
+
+    #[test]
+    fn test_classify_multiline_url_like_not_url() {
+        // Multi-line input starting with http:// should NOT be classified as Url
+        let input = "https://example.com/path\nsome other line";
+        assert_ne!(classify(input), ContentType::Url);
     }
 
     #[test]

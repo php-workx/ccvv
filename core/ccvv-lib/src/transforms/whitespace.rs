@@ -3,14 +3,13 @@
 //! Port of the Swift `ccvv()` function from `mac/main.swift:11-209`.
 //! See §5.4 Stage 3 of the technical spec.
 
+use std::collections::HashMap;
 use regex::Regex;
 use std::sync::LazyLock;
 
 use super::{Transform, TransformContext};
 
-static TRAILING_WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+$").unwrap());
 static MULTI_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" {3,}").unwrap());
-static LEADING_WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s+").unwrap());
 static BULLET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[•◦▪]\s+").unwrap());
 static NUMBERED_LIST_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+[.)\]] ").unwrap());
 static RECORDING_DOT_BULLET_RE: LazyLock<Regex> =
@@ -84,7 +83,7 @@ pub fn ccvv(input: &str) -> String {
     };
 
     for raw_line in &raw_lines {
-        let mut line = TRAILING_WS_RE.replace(raw_line, "").to_string();
+        let mut line = raw_line.trim_end().to_string();
 
         // Collapse terminal padding and detect excessive leading whitespace
         let mut excessive_padding = false;
@@ -123,12 +122,12 @@ pub fn ccvv(input: &str) -> String {
         }
 
         let mut indent = leading_indent_count(&line);
-        let mut cleaned = LEADING_WS_RE.replace(&line, "").to_string();
+        let mut cleaned = line.trim_start().to_string();
 
         // Strip recording dot at line start
         if cleaned.starts_with('\u{23FA}') {
             cleaned = cleaned.trim_start_matches('\u{23FA}').to_string();
-            cleaned = LEADING_WS_RE.replace(&cleaned, "").to_string();
+            cleaned = cleaned.trim_start().to_string();
         }
 
         // Adjust indent for sub-bullet markers
@@ -164,7 +163,7 @@ pub fn ccvv(input: &str) -> String {
             });
         }
 
-        prev_raw_line_len = TRAILING_WS_RE.replace(raw_line, "").len();
+        prev_raw_line_len = raw_line.trim_end().len();
     }
 
     flush_paragraph(&mut paragraph, &mut blocks);
@@ -183,8 +182,7 @@ fn detect_terminal_width(raw_lines: &[&str]) -> usize {
         .filter(|&len| len > 40)
         .collect();
 
-    let mut length_counts: std::collections::HashMap<usize, usize> =
-        std::collections::HashMap::new();
+    let mut length_counts: HashMap<usize, usize> = HashMap::new();
     for &len in &raw_lengths {
         *length_counts.entry(len).or_insert(0) += 1;
     }

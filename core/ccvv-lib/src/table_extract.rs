@@ -3,6 +3,7 @@
 //! Parses terminal box tables, markdown pipe tables, and delimiter tables
 //! into a canonical row/column matrix.
 
+use std::collections::HashMap;
 use serde::Serialize;
 use std::sync::OnceLock;
 
@@ -77,6 +78,9 @@ pub fn extract_table(input: &str) -> TableExtraction {
         candidates.push(candidate);
     }
     if let Some(candidate) = parse_terminal_flattened(trimmed) {
+        candidates.push(candidate);
+    }
+    if let Some(candidate) = parse_aligned_pipe_columns(trimmed) {
         candidates.push(candidate);
     }
     if let Some(candidate) = parse_markdown(trimmed) {
@@ -236,7 +240,7 @@ fn split_row_chunks_by_bar_groups(line: &str, cols_hint: Option<usize>) -> Vec<S
     if bars.len() < bars_per_row * 2 {
         return Vec::new();
     }
-    if bars.len() % bars_per_row != 0 {
+    if !bars.len().is_multiple_of(bars_per_row) {
         return Vec::new();
     }
 
@@ -257,8 +261,123 @@ fn split_row_chunks_by_bar_groups(line: &str, cols_hint: Option<usize>) -> Vec<S
     chunks
 }
 
+fn parse_aligned_pipe_columns(input: &str) -> Option<ParseCandidate> {
+    let lines: Vec<&str> = input
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.len() < 2 {
+        return None;
+    }
+
+    let mut bars_by_line: Vec<(&str, Vec<usize>)> = Vec::new();
+    for line in &lines {
+        let bars = bar_positions(line);
+        if bars.len() >= 3 {
+            bars_by_line.push((line, bars));
+        }
+    }
+    if bars_by_line.len() < 2 {
+        return None;
+    }
+
+    let mut freq: HashMap<usize, usize> = HashMap::new();
+    for (_, bars) in &bars_by_line {
+        *freq.entry(bars.len()).or_insert(0) += 1;
+    }
+    let (&bar_count, &match_count) = freq.iter().max_by_key(|(_, count)| *count)?;
+    if bar_count < 3 || match_count < 2 {
+        return None;
+    }
+
+    let aligned_candidates: Vec<(&str, &Vec<usize>)> = bars_by_line
+        .iter()
+        .filter(|(_, bars)| bars.len() == bar_count)
+        .map(|(line, bars)| (*line, bars))
+        .collect();
+    if aligned_candidates.len() < 2 {
+        return None;
+    }
+
+    // Constant visual column boundaries: each bar slot should be near same position.
+    const SLOT_DRIFT_TOLERANCE: usize = 6;
+    for slot in 0..bar_count {
+        let mut min_pos = usize::MAX;
+        let mut max_pos = 0usize;
+        for (_, bars) in &aligned_candidates {
+            min_pos = min_pos.min(bars[slot]);
+            max_pos = max_pos.max(bars[slot]);
+        }
+        if max_pos.saturating_sub(min_pos) > SLOT_DRIFT_TOLERANCE {
+            return None;
+        }
+    }
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for (line, _) in &aligned_candidates {
+        if is_box_separator_line(line) {
+            continue;
+        }
+        if let Some(cells) = split_box_cells(line) {
+            if cells.len() >= 2 {
+                rows.push(cells);
+            }
+        }
+    }
+    if rows.len() < 2 {
+        return None;
+    }
+
+    // Require content in at least two distinct columns to avoid false positives.
+    let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if col_count < 2 {
+        return None;
+    }
+    let mut cols_with_text = 0usize;
+    for c in 0..col_count {
+        if rows
+            .iter()
+            .any(|row| row.get(c).map(|v| !v.trim().is_empty()).unwrap_or(false))
+        {
+            cols_with_text += 1;
+        }
+    }
+    if cols_with_text < 2 {
+        return None;
+    }
+
+    let mut confidence = 0.68f32;
+    if aligned_candidates.len() >= 3 {
+        confidence += 0.05;
+    }
+    if input.contains('│') {
+        confidence += 0.03;
+    }
+    if input.contains('├') || input.contains('┼') || input.contains('┤') {
+        // If explicit border separators exist, prefer dedicated box-table parsers.
+        confidence -= 0.06;
+    }
+    confidence = confidence.clamp(0.0, 0.99);
+
+    Some(ParseCandidate {
+        format: TableFormat::Terminal,
+        confidence,
+        rows,
+        warnings: vec!["inferred table from aligned pipe columns".to_string()],
+    })
+}
+
+fn bar_positions(line: &str) -> Vec<usize> {
+    line.char_indices()
+        .filter(|(_, ch)| *ch == '│' || *ch == '|')
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
 fn parse_terminal_box(input: &str) -> Option<ParseCandidate> {
-    let lines: Vec<&str> = input.lines().collect();
+    let raw_lines: Vec<&str> = input.lines().collect();
+    let lines = normalize_box_lines_for_clipped_edges(&raw_lines);
     if lines.len() < 2 {
         return None;
     }
@@ -325,7 +444,12 @@ fn parse_terminal_box(input: &str) -> Option<ParseCandidate> {
     finalize_row(&mut rows, &mut current);
 
     rows.retain(|row| row.iter().any(|cell| !cell.trim().is_empty()));
-    if rows.len() < 2 || expected_cols < 2 {
+    if rows.is_empty() || expected_cols < 2 {
+        return None;
+    }
+
+    // Accept a single wrapped row as a table candidate when there is enough structure.
+    if rows.len() == 1 && !saw_separator && cell_lines < 2 {
         return None;
     }
 
@@ -347,6 +471,39 @@ fn parse_terminal_box(input: &str) -> Option<ParseCandidate> {
         rows,
         warnings,
     })
+}
+
+fn normalize_box_lines_for_clipped_edges(lines: &[&str]) -> Vec<String> {
+    let mut freq: HashMap<usize, usize> = HashMap::new();
+    for line in lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('│') || trimmed.starts_with('|') {
+            let bars = bar_positions(line).len();
+            if bars >= 3 {
+                *freq.entry(bars).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let expected_bars = freq.iter().max_by_key(|(_, count)| *count).map(|(bars, _)| *bars);
+    let Some(expected_bars) = expected_bars else {
+        return lines.iter().map(|line| (*line).to_string()).collect();
+    };
+
+    lines
+        .iter()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let bars = bar_positions(line).len();
+            let starts_with_bar = trimmed.starts_with('│') || trimmed.starts_with('|');
+            let likely_clipped_left = !starts_with_bar && bars >= 2 && bars + 1 == expected_bars;
+            if likely_clipped_left {
+                format!("│ {}", trimmed)
+            } else {
+                (*line).to_string()
+            }
+        })
+        .collect()
 }
 
 fn finalize_row(rows: &mut Vec<Vec<String>>, current: &mut Option<Vec<String>>) {
@@ -514,7 +671,7 @@ fn parse_delimited(input: &str) -> Option<ParseCandidate> {
             continue;
         }
 
-        let mut freq: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut freq: HashMap<usize, usize> = HashMap::new();
         for row in &split_lines {
             *freq.entry(row.len()).or_insert(0) += 1;
         }
@@ -562,7 +719,7 @@ fn parse_delimited(input: &str) -> Option<ParseCandidate> {
     best
 }
 
-fn split_csv_line(line: &str, delimiter: char) -> Vec<String> {
+pub fn split_csv_line(line: &str, delimiter: char) -> Vec<String> {
     let mut fields = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -671,6 +828,78 @@ mod tests {
                     .map(|v| v.contains("Less critical — Modal manages container lifecycle."))
                     .unwrap_or(false)
             }),
+            "rows: {:?}",
+            parsed.rows
+        );
+    }
+
+    #[test]
+    fn extracts_aligned_pipe_cells_without_separators() {
+        let input = r#"
+  │ Memory snapshot    │ @modal.enter snapshot may become  │ [M] Periodic forced re-snapshot (redeploy) [S]     │
+  │ drift              │ stale, causing subtle bugs after  │ Test snapshot restore in staging                   │
+  │                    │ Modal infra updates               │                                                    │
+"#;
+        let parsed = extract_table(input);
+        assert!(parsed.detected, "expected detection, got: {:?}", parsed);
+        assert_eq!(parsed.format, Some(TableFormat::Terminal));
+        assert!(
+            parsed.rows
+                .iter()
+                .any(|r| r.get(0).map(|v| v.contains("Memory snapshot")).unwrap_or(false)),
+            "rows: {:?}",
+            parsed.rows
+        );
+        assert!(
+            parsed.rows
+                .iter()
+                .any(|r| r.get(1).map(|v| v.contains("Modal infra updates")).unwrap_or(false)),
+            "rows: {:?}",
+            parsed.rows
+        );
+    }
+
+    #[test]
+    fn extracts_single_wrapped_row_table() {
+        let input = r#"
+  │ production-web-server │ Port 8080 SG rule removed entirely (open: false   │
+  │                       │ on phpMyAdmin listener)                           │
+"#;
+        let parsed = extract_table(input);
+        assert!(parsed.detected, "expected detection, got: {:?}", parsed);
+        assert_eq!(parsed.format, Some(TableFormat::Terminal));
+        assert_eq!(parsed.rows.len(), 1, "rows: {:?}", parsed.rows);
+        assert!(
+            parsed.rows[0][0].contains("production-web-server"),
+            "rows: {:?}",
+            parsed.rows
+        );
+        assert!(
+            parsed.rows[0][1]
+                .contains("Port 8080 SG rule removed entirely (open: false on phpMyAdmin listener)"),
+            "rows: {:?}",
+            parsed.rows
+        );
+    }
+
+    #[test]
+    fn extracts_wrapped_row_with_clipped_left_border() {
+        let input = r#"
+production-web-server │ Port 8080 SG rule removed entirely (open: false   │
+  │                       │ on phpMyAdmin listener)                           │
+"#;
+        let parsed = extract_table(input);
+        assert!(parsed.detected, "expected detection, got: {:?}", parsed);
+        assert_eq!(parsed.format, Some(TableFormat::Terminal));
+        assert_eq!(parsed.rows.len(), 1, "rows: {:?}", parsed.rows);
+        assert!(
+            parsed.rows[0][0].contains("production-web-server"),
+            "rows: {:?}",
+            parsed.rows
+        );
+        assert!(
+            parsed.rows[0][1]
+                .contains("Port 8080 SG rule removed entirely (open: false on phpMyAdmin listener)"),
             "rows: {:?}",
             parsed.rows
         );

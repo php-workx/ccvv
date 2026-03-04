@@ -35,7 +35,7 @@ impl SecretFilter {
 
         let patterns = pattern_strings
             .iter()
-            .filter_map(|p| Regex::new(p).ok())
+            .map(|p| Regex::new(p).expect("built-in secret pattern must compile"))
             .collect();
 
         SecretFilter { patterns }

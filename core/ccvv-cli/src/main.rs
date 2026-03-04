@@ -370,8 +370,13 @@ fn cmd_validate(cli: &Cli) {
 /// Read all of stdin.
 fn read_stdin() -> String {
     let mut input = String::new();
-    io::stdin().read_to_string(&mut input).unwrap();
-    input
+    match io::stdin().read_to_string(&mut input) {
+        Ok(_) => input,
+        Err(e) => {
+            eprintln!("ccvv: failed to read stdin: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Build a pipeline based on CLI flags.
