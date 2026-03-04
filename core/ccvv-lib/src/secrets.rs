@@ -35,7 +35,7 @@ impl SecretFilter {
 
         let patterns = pattern_strings
             .iter()
-            .filter_map(|p| Regex::new(p).ok())
+            .map(|p| Regex::new(p).expect("built-in secret pattern must compile"))
             .collect();
 
         SecretFilter { patterns }
@@ -67,6 +67,7 @@ mod tests {
     #[test]
     fn test_jwt_detected() {
         let filter = SecretFilter::new();
+        // nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
         let input = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
         assert!(filter.check(input));
     }
@@ -75,6 +76,7 @@ mod tests {
     fn test_github_token_detected() {
         let filter = SecretFilter::new();
         // ghp_ + exactly 36 alphanumeric chars
+        // nosemgrep: generic.secrets.security.detected-github-token.detected-github-token
         let input = "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
         assert!(filter.check(input));
     }

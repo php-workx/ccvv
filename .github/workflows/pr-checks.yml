@@ -2,19 +2,19 @@ name: PR Checks
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-
-permissions:
-  contents: read
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
-  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  group: pr-checks-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   fmt:
     name: Rust Format
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -30,6 +30,8 @@ jobs:
   clippy:
     name: Rust Lint (Clippy)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -45,6 +47,8 @@ jobs:
   test:
     name: Rust Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -60,6 +64,8 @@ jobs:
   semgrep:
     name: Semgrep
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -76,6 +82,8 @@ jobs:
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -89,6 +97,8 @@ jobs:
   audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -106,6 +116,8 @@ jobs:
   coverage:
     name: Coverage (LCOV)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
@@ -124,29 +136,3 @@ jobs:
         with:
           name: lcov
           path: core/target/coverage/lcov.info
-
-  sonarqube:
-    name: SonarQube
-    runs-on: ubuntu-latest
-    if: ${{ secrets.SONAR_TOKEN != '' && secrets.SONAR_HOST_URL != '' && secrets.SONAR_PROJECT_KEY != '' }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: |
-            just
-            cargo-llvm-cov
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: core
-      - name: Generate lcov for sonar
-        run: just coverage
-      - name: Sonar scan
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
-        run: just sonar

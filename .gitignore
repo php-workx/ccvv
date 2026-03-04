@@ -11,3 +11,6 @@ core/target/
 .DS_STORE
 .idea
 firebase-debug.log
+/.sonarqube/
+/.scannerwork/
+sonar-project.properties

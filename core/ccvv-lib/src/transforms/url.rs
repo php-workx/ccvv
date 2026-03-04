@@ -74,6 +74,12 @@ impl UrlTransform {
         self.domain_overrides = overrides;
         self
     }
+
+    /// Append extra deny parameters (from config `url_global_deny`).
+    pub fn with_extra_deny_params(mut self, extra: Vec<String>) -> Self {
+        self.deny_params.extend(extra);
+        self
+    }
 }
 
 impl Default for UrlTransform {
@@ -89,8 +95,6 @@ impl Transform for UrlTransform {
 
     fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
         let mut total_changed = 0usize;
-
-        // Track code fence state to skip URLs inside fences
         let mut in_fence = false;
         let lines: Vec<&str> = input.split('\n').collect();
         let mut processed_lines: Vec<String> = Vec::new();
@@ -105,28 +109,7 @@ impl Transform for UrlTransform {
                 processed_lines.push(line.to_string());
                 continue;
             }
-
-            // Also skip URLs inside backtick spans
-            let backtick_parts: Vec<&str> = line.split('`').collect();
-            let processed_line = if backtick_parts.len() > 1 {
-                // Rebuild line processing only even-indexed parts (outside backticks)
-                let mut rebuilt = String::new();
-                for (i, part) in backtick_parts.iter().enumerate() {
-                    if i % 2 == 0 {
-                        rebuilt.push_str(&self.clean_urls_in_text(part, &mut total_changed));
-                    } else {
-                        rebuilt.push_str(part);
-                    }
-                    if i < backtick_parts.len() - 1 {
-                        rebuilt.push('`');
-                    }
-                }
-                rebuilt
-            } else {
-                self.clean_urls_in_text(line, &mut total_changed)
-            };
-
-            processed_lines.push(processed_line);
+            processed_lines.push(self.process_line_urls(line, &mut total_changed));
         }
 
         let result = processed_lines.join("\n");
@@ -144,6 +127,26 @@ impl Transform for UrlTransform {
 }
 
 impl UrlTransform {
+    /// Process a single line, splitting by backticks to skip URLs in code spans.
+    fn process_line_urls(&self, line: &str, total_changed: &mut usize) -> String {
+        let backtick_parts: Vec<&str> = line.split('`').collect();
+        if backtick_parts.len() <= 1 {
+            return self.clean_urls_in_text(line, total_changed);
+        }
+        let mut rebuilt = String::new();
+        for (i, part) in backtick_parts.iter().enumerate() {
+            if i % 2 == 0 {
+                rebuilt.push_str(&self.clean_urls_in_text(part, total_changed));
+            } else {
+                rebuilt.push_str(part);
+            }
+            if i < backtick_parts.len() - 1 {
+                rebuilt.push('`');
+            }
+        }
+        rebuilt
+    }
+
     /// Clean URLs found in a text segment.
     fn clean_urls_in_text(&self, text: &str, total_changed: &mut usize) -> String {
         let mut result = text.to_string();
@@ -169,31 +172,43 @@ impl UrlTransform {
     /// Clean a single URL: strip tracking params, normalize host.
     fn clean_url(&self, url_str: &str) -> Option<String> {
         let parsed = url::Url::parse(url_str).ok()?;
-        let domain = parsed.host_str().map(|h| h.to_string());
 
         let mut new_url = parsed.clone();
+        self.strip_www_from_url(&mut new_url);
+        let domain = new_url.host_str().map(|h| h.to_string());
+        self.filter_query_params(&mut new_url, domain.as_deref());
 
-        // Strip www. from host
-        if self.strip_www {
-            if let Some(host) = parsed.host_str() {
-                if let Some(stripped) = host.strip_prefix("www.") {
-                    if let Ok(mut u) = url::Url::parse(url_str) {
-                        let _ = u.set_host(Some(stripped));
-                        new_url = u;
-                    }
-                }
-            }
+        let mut result = new_url.to_string();
+        if self.strip_scheme {
+            result = strip_scheme(&result);
+        }
+        if result.ends_with('/') && !url_str.ends_with('/') {
+            result.pop();
         }
 
-        // Filter query parameters
-        let pairs: Vec<(String, String)> = new_url
+        Some(result)
+    }
+
+    fn strip_www_from_url(&self, new_url: &mut url::Url) {
+        if !self.strip_www {
+            return;
+        }
+        if let Some(host) = new_url.host_str().map(|h| h.to_string()) {
+            if let Some(stripped) = host.strip_prefix("www.") {
+                let _ = new_url.set_host(Some(stripped));
+            }
+        }
+    }
+
+    fn filter_query_params(&self, url: &mut url::Url, domain: Option<&str>) {
+        let pairs: Vec<(String, String)> = url
             .query_pairs()
-            .filter(|(key, _)| !self.should_strip_param(key, domain.as_deref()))
+            .filter(|(key, _)| !self.should_strip_param(key, domain))
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
 
         if pairs.is_empty() {
-            new_url.set_query(None);
+            url.set_query(None);
         } else {
             let query = pairs
                 .iter()
@@ -206,26 +221,8 @@ impl UrlTransform {
                 })
                 .collect::<Vec<_>>()
                 .join("&");
-            new_url.set_query(Some(&query));
+            url.set_query(Some(&query));
         }
-
-        let mut result = new_url.to_string();
-
-        // Strip scheme if configured
-        if self.strip_scheme {
-            if let Some(rest) = result.strip_prefix("https://") {
-                result = rest.to_string();
-            } else if let Some(rest) = result.strip_prefix("http://") {
-                result = rest.to_string();
-            }
-        }
-
-        // Remove trailing slash added by url crate on bare domains
-        if result.ends_with('/') && !url_str.ends_with('/') {
-            result.pop();
-        }
-
-        Some(result)
     }
 
     /// Check if a parameter should be stripped, considering per-domain overrides.
@@ -257,6 +254,16 @@ impl UrlTransform {
             return true;
         }
         false
+    }
+}
+
+fn strip_scheme(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://") {
+        rest.to_string()
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        rest.to_string()
+    } else {
+        url.to_string()
     }
 }
 

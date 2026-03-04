@@ -4,6 +4,7 @@ set -e
 APP_NAME="ccvv"
 BUILD_DIR="build"
 TEAM_ID="4JRN737CHR"
+# shellcheck disable=SC2034  # kept for reference; used by codesign/notarize workflows
 BUNDLE_ID="com.ccvv.app"
 NOTARIZE=0
 SKIP_RUST=0
@@ -38,7 +39,10 @@ if [[ "$SKIP_RUST" -eq 0 ]]; then
     RUST_OUT_DIR=$(cd "$CORE_DIR" && cargo metadata --format-version 1 2>/dev/null \
         | python3 -c "import sys,json; print(json.load(sys.stdin)['target_directory'])" 2>/dev/null \
         || echo "$CORE_DIR/target")
-    HEADER_DIR=$(find "$RUST_OUT_DIR/release/build" -name "ccvv-bridge.h" -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)
+    HEADER_DIR=$(find "$RUST_OUT_DIR/release/build" -name "ccvv-bridge.h" -print -quit 2>/dev/null)
+    if [[ -n "$HEADER_DIR" ]]; then
+        HEADER_DIR=$(dirname "$HEADER_DIR")
+    fi
     LIB_PATH="$RUST_OUT_DIR/release/libccvv_lib.a"
 
     if [[ ! -f "$LIB_PATH" ]]; then
@@ -82,6 +86,11 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
 cp Info.plist "$APP_BUNDLE/Contents/"
+if [[ -f "$SCRIPT_DIR/assets/ccvv.icns" ]]; then
+    cp "$SCRIPT_DIR/assets/ccvv.icns" "$APP_BUNDLE/Contents/Resources/ccvv.icns"
+else
+    echo "Warning: icon asset missing at $SCRIPT_DIR/assets/ccvv.icns"
+fi
 
 echo "Signing..."
 # Prefer Developer ID (distributable), fall back to Apple Development, then ad-hoc
@@ -106,16 +115,16 @@ if [[ "$NOTARIZE" -eq 1 && "$SIGN_ID" == *"Developer ID"* ]]; then
     echo "Notarizing..."
     ZIP_PATH="$BUILD_DIR/$APP_NAME-notarize.zip"
     ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_PATH"
-    xcrun notarytool submit "$ZIP_PATH" --keychain-profile "notarytool" --wait 2>&1 && {
+    if xcrun notarytool submit "$ZIP_PATH" --keychain-profile "notarytool" --wait 2>&1; then
         echo "Stapling notarization ticket..."
         xcrun stapler staple "$APP_BUNDLE"
         rm -f "$ZIP_PATH"
-    } || {
+    else
         echo ""
         echo "Notarization failed. To set up credentials:"
         echo "  xcrun notarytool store-credentials notarytool --apple-id YOUR_APPLE_ID --team-id $TEAM_ID"
         rm -f "$ZIP_PATH"
-    }
+    fi
 fi
 
 echo ""

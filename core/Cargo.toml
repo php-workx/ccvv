@@ -2,6 +2,9 @@
 members = ["ccvv-lib", "ccvv-cli"]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.82"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

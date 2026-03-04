@@ -3,6 +3,7 @@ name = "ccvv-lib"
 version = "1.1.0"
 edition = "2021"
 license = "MIT"
+rust-version.workspace = true
 
 [lib]
 name = "ccvv_lib"

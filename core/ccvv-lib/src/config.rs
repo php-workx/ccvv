@@ -300,36 +300,32 @@ pub fn resolve_config(
     let mut settings = config.settings.clone();
 
     // Apply profile overlay if specified
+    macro_rules! apply_overlay {
+        ($settings:expr, $overlay:expr, $($field:ident),+ $(,)?) => {
+            $(
+                if let Some(v) = $overlay.$field {
+                    $settings.$field = v;
+                }
+            )+
+        };
+    }
+
     if let Some(profile_name) = profile {
         if let Some(profiles) = &config.profiles {
             if let Some(overlay) = profiles.get(profile_name) {
-                if let Some(v) = overlay.normalize_unicode {
-                    settings.normalize_unicode = v;
-                }
-                if let Some(v) = overlay.whitespace_cleanup {
-                    settings.whitespace_cleanup = v;
-                }
-                if let Some(v) = overlay.agent_strip {
-                    settings.agent_strip = v;
-                }
-                if let Some(v) = overlay.structural_detection {
-                    settings.structural_detection = v;
-                }
-                if let Some(v) = overlay.url_cleaning {
-                    settings.url_cleaning = v;
-                }
-                if let Some(v) = overlay.table_cell_picker {
-                    settings.table_cell_picker = v;
-                }
-                if let Some(v) = overlay.auto_wrapper {
-                    settings.auto_wrapper = v;
-                }
-                if let Some(v) = overlay.user_rules {
-                    settings.user_rules = v;
-                }
-                if let Some(v) = overlay.sensitive_filter {
-                    settings.sensitive_filter = v;
-                }
+                apply_overlay!(
+                    settings,
+                    overlay,
+                    normalize_unicode,
+                    whitespace_cleanup,
+                    agent_strip,
+                    structural_detection,
+                    url_cleaning,
+                    table_cell_picker,
+                    auto_wrapper,
+                    user_rules,
+                    sensitive_filter,
+                );
             } else {
                 return Err(CcvvError::Config(format!(
                     "Profile '{}' not found in config",
@@ -339,47 +335,8 @@ pub fn resolve_config(
         }
     }
 
-    // Compile user rules
-    let mut compiled_rules = Vec::new();
-    if let Some(rules) = &config.rules {
-        if rules.len() > crate::transforms::userrules::MAX_USER_RULES {
-            return Err(CcvvError::Config(format!(
-                "Too many user rules: {} (max {})",
-                rules.len(),
-                crate::transforms::userrules::MAX_USER_RULES
-            )));
-        }
-        for rule in rules {
-            let regex = Regex::new(&rule.pattern).map_err(|e| {
-                CcvvError::Config(format!("Invalid regex in rule '{}': {}", rule.name, e))
-            })?;
-            compiled_rules.push(CompiledUserRule {
-                name: rule.name.clone(),
-                regex,
-                replacement: rule.replacement.clone(),
-            });
-        }
-    }
-
-    // Merge URL deny lists: start with defaults, append user additions
-    let mut url_global_deny: Vec<String> = crate::transforms::url::DEFAULT_DENY_PARAMS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let mut url_domain_overrides = std::collections::HashMap::new();
-    if let Some(url_params) = &config.url_params {
-        url_global_deny.extend(url_params.global_deny.iter().cloned());
-        url_domain_overrides = url_params.domains.clone();
-    }
-
-    // Merge exclusions: start with default password manager exclusions, append user additions
-    let mut exclusion_bundle_ids: Vec<String> = DEFAULT_EXCLUSION_BUNDLE_IDS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    if let Some(exclusions) = &config.exclusions {
-        exclusion_bundle_ids.extend(exclusions.bundle_ids.iter().cloned());
-    }
+    let compiled_rules = compile_user_rules(config)?;
+    let (url_global_deny, url_domain_overrides, exclusion_bundle_ids) = merge_deny_lists(config);
 
     // Validate settings ranges
     if settings.max_input_bytes == 0 {
@@ -401,7 +358,15 @@ pub fn resolve_config(
             }
             Some(*ms)
         }
-        DoubleTapSetting::Adaptive(_) => None,
+        DoubleTapSetting::Adaptive(s) => {
+            if s != "auto" {
+                return Err(CcvvError::Config(format!(
+                    "double_tap_window_ms: invalid value \"{}\", expected a number or \"auto\"",
+                    s
+                )));
+            }
+            None
+        }
     };
 
     // Resolve em-dash replacement
@@ -418,11 +383,70 @@ pub fn resolve_config(
     })
 }
 
+fn compile_user_rules(config: &CcvvConfig) -> Result<Vec<CompiledUserRule>, CcvvError> {
+    let mut compiled_rules = Vec::new();
+    if let Some(rules) = &config.rules {
+        if rules.len() > crate::transforms::userrules::MAX_USER_RULES {
+            return Err(CcvvError::Config(format!(
+                "Too many user rules: {} (max {})",
+                rules.len(),
+                crate::transforms::userrules::MAX_USER_RULES
+            )));
+        }
+        for rule in rules {
+            let regex = Regex::new(&rule.pattern).map_err(|e| {
+                CcvvError::Config(format!("Invalid regex in rule '{}': {}", rule.name, e))
+            })?;
+            compiled_rules.push(CompiledUserRule {
+                name: rule.name.clone(),
+                regex,
+                replacement: rule.replacement.clone(),
+            });
+        }
+    }
+    Ok(compiled_rules)
+}
+
+fn merge_deny_lists(
+    config: &CcvvConfig,
+) -> (
+    Vec<String>,
+    std::collections::HashMap<String, DomainOverride>,
+    Vec<String>,
+) {
+    let mut url_global_deny: Vec<String> = crate::transforms::url::DEFAULT_DENY_PARAMS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut url_domain_overrides = std::collections::HashMap::new();
+    if let Some(url_params) = &config.url_params {
+        url_global_deny.extend(url_params.global_deny.iter().cloned());
+        url_domain_overrides = url_params.domains.clone();
+    }
+
+    let mut exclusion_bundle_ids: Vec<String> = DEFAULT_EXCLUSION_BUNDLE_IDS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(exclusions) = &config.exclusions {
+        exclusion_bundle_ids.extend(exclusions.bundle_ids.iter().cloned());
+    }
+
+    (url_global_deny, url_domain_overrides, exclusion_bundle_ids)
+}
+
 /// Validate a config without resolving it. Returns validation errors.
 pub fn validate_config(config: &CcvvConfig) -> Vec<String> {
     let mut errors = Vec::new();
+    errors.extend(validate_user_rules(config));
+    errors.extend(validate_settings_ranges(&config.settings));
+    errors.extend(validate_profile_names(&config.profiles));
+    errors.extend(validate_bundle_ids(&config.exclusions));
+    errors
+}
 
-    // Validate regex rules
+fn validate_user_rules(config: &CcvvConfig) -> Vec<String> {
+    let mut errors = Vec::new();
     if let Some(rules) = &config.rules {
         if rules.len() > crate::transforms::userrules::MAX_USER_RULES {
             errors.push(format!(
@@ -437,31 +461,42 @@ pub fn validate_config(config: &CcvvConfig) -> Vec<String> {
             }
         }
     }
+    errors
+}
 
-    // Validate settings ranges
-    if config.settings.max_input_bytes == 0 {
+fn validate_settings_ranges(settings: &Settings) -> Vec<String> {
+    let mut errors = Vec::new();
+    if settings.max_input_bytes == 0 {
         errors.push("max_input_bytes must be > 0".to_string());
     }
-    if !(0.0..=1.0).contains(&config.settings.table_cell_picker_min_confidence) {
+    if !(0.0..=1.0).contains(&settings.table_cell_picker_min_confidence) {
         errors.push("table_cell_picker_min_confidence must be between 0.0 and 1.0".to_string());
     }
-    if let DoubleTapSetting::Fixed(ms) = config.settings.double_tap_window_ms {
-        if !(100..=2000).contains(&ms) {
+    if let DoubleTapSetting::Fixed(ms) = &settings.double_tap_window_ms {
+        if !(100..=2000).contains(ms) {
             errors.push("double_tap_window_ms must be between 100 and 2000".to_string());
         }
     }
+    errors
+}
 
-    // Validate profile references exist
-    if let Some(profiles) = &config.profiles {
+fn validate_profile_names(
+    profiles: &Option<std::collections::HashMap<String, ProfileOverride>>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Some(profiles) = profiles {
         for name in profiles.keys() {
             if name.is_empty() {
                 errors.push("Profile name cannot be empty".to_string());
             }
         }
     }
+    errors
+}
 
-    // Validate bundle ID format in exclusions
-    if let Some(exclusions) = &config.exclusions {
+fn validate_bundle_ids(exclusions: &Option<ExclusionsConfig>) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Some(exclusions) = exclusions {
         for bid in &exclusions.bundle_ids {
             if !bid.contains('.') {
                 errors.push(format!(
@@ -471,7 +506,6 @@ pub fn validate_config(config: &CcvvConfig) -> Vec<String> {
             }
         }
     }
-
     errors
 }
 

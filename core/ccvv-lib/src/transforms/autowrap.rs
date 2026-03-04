@@ -191,54 +191,48 @@ pub fn should_wrap_code_token(token: &str) -> bool {
         return false;
     }
 
-    // CLI flags: --flag (must have alphanumeric after --)
+    // CLI flags: --flag
     if token.starts_with("--") && token.len() > 2 && token.as_bytes()[2].is_ascii_alphanumeric() {
         return true;
     }
-    // Contains underscore: snake_case
     if token.contains('_') {
         return true;
     }
-    // Path-like
-    if token.contains('/')
+    if looks_like_path(token) {
+        return true;
+    }
+    if FILENAME_RE.is_match(token) {
+        return true;
+    }
+    looks_like_code_identifier(token)
+}
+
+fn looks_like_path(token: &str) -> bool {
+    token.contains('/')
         && (token.starts_with('/')
             || token.starts_with("./")
             || token.starts_with("../")
             || token.contains('.')
             || token.contains('-')
             || token.contains(':'))
-    {
-        return true;
-    }
-    // Filename: word.ext or host:port
-    if FILENAME_RE.is_match(token) {
-        return true;
-    }
-    // camelCase / PascalCase (must have at least one lowercase to exclude all-caps like SF, API)
+}
+
+fn looks_like_code_identifier(token: &str) -> bool {
     if CAMEL_CASE_RE.is_match(token) && token.chars().any(|c| c.is_ascii_lowercase()) {
         return true;
     }
-    // SCREAMING_CASE
     if SCREAMING_CASE_RE.is_match(token) {
         return true;
     }
-
-    // host:port pattern (e.g., "localhost:8080", "db.example.com:5432")
     if HOST_PORT_RE.is_match(token) {
         return true;
     }
-    // Shell prompts: tokens starting with $ or ending with > that look like prompts
     if (token.starts_with('$') && token.len() > 1 && !token.contains(' '))
         || (token.ends_with('>') && token.contains('#'))
     {
         return true;
     }
-    // Dot access: object.property or module.name (each part ≥ 2 chars)
-    if DOT_ACCESS_RE.is_match(token) {
-        return true;
-    }
-
-    false
+    DOT_ACCESS_RE.is_match(token)
 }
 
 #[cfg(test)]

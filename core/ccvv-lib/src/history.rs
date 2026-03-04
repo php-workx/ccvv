@@ -261,8 +261,8 @@ impl HistoryDb {
                 })
             })
             .map_err(|e| CcvvError::Database(e.to_string()))?
-            .filter_map(|e| e.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CcvvError::Database(e.to_string()))?;
 
         Ok(entries)
     }
@@ -278,13 +278,13 @@ impl HistoryDb {
             .prepare(
                 "SELECT id, raw_hash, raw_text, cleaned_text, content_type, preview, committed, created_at
                  FROM history
-                 WHERE committed = 1 AND cleaned_text LIKE ?1
+                 WHERE committed = 1 AND cleaned_text LIKE ?1 ESCAPE '\\'
                  ORDER BY created_at DESC
                  LIMIT ?2",
             )
             .map_err(|e| CcvvError::Database(e.to_string()))?;
 
-        let pattern = format!("%{}%", query);
+        let pattern = format!("%{}%", escape_like(query));
         let entries = stmt
             .query_map(params![pattern, limit as i64], |row| {
                 Ok(HistoryEntry {
@@ -299,8 +299,8 @@ impl HistoryDb {
                 })
             })
             .map_err(|e| CcvvError::Database(e.to_string()))?
-            .filter_map(|e| e.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CcvvError::Database(e.to_string()))?;
 
         Ok(entries)
     }
@@ -340,8 +340,8 @@ impl HistoryDb {
                 })
             })
             .map_err(|e| CcvvError::Database(e.to_string()))?
-            .filter_map(|e| e.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CcvvError::Database(e.to_string()))?;
 
         Ok(entries)
     }
@@ -360,6 +360,14 @@ impl HistoryDb {
 
         Ok(())
     }
+}
+
+/// Escape LIKE wildcards for safe use in SQL LIKE patterns.
+fn escape_like(query: &str) -> String {
+    query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Compute SHA-256 hash of text content.
@@ -519,6 +527,31 @@ mod tests {
 
         let recent = db.recent(10).unwrap();
         assert!(recent[0].raw_text.is_none());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_search_escapes_like_wildcards() {
+        let path = temp_db_path();
+        let db = HistoryDb::open(&path).unwrap();
+
+        let id1 = db.prepare("raw1", "100% complete", None, false).unwrap();
+        db.commit_entry(id1).unwrap();
+        let id2 = db.prepare("raw2", "user_name is set", None, false).unwrap();
+        db.commit_entry(id2).unwrap();
+        let id3 = db.prepare("raw3", "unrelated text", None, false).unwrap();
+        db.commit_entry(id3).unwrap();
+
+        // Searching for literal "%" should only match the entry containing "%"
+        let results = db.search("%", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].cleaned_text.contains("%"));
+
+        // Searching for literal "_" should only match the entry containing "_"
+        let results = db.search("_", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].cleaned_text.contains("_"));
 
         std::fs::remove_file(&path).ok();
     }

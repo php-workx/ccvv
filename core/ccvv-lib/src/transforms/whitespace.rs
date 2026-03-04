@@ -4,13 +4,12 @@
 //! See §5.4 Stage 3 of the technical spec.
 
 use regex::Regex;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use super::{Transform, TransformContext};
 
-static TRAILING_WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+$").unwrap());
 static MULTI_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" {3,}").unwrap());
-static LEADING_WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s+").unwrap());
 static BULLET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[•◦▪]\s+").unwrap());
 static NUMBERED_LIST_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+[.)\]] ").unwrap());
 static RECORDING_DOT_BULLET_RE: LazyLock<Regex> =
@@ -50,11 +49,8 @@ impl Transform for WhitespaceTransform {
 
 /// Main text cleaning function — port of Swift `ccvv()`.
 pub fn ccvv(input: &str) -> String {
-    // Normalize line endings
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
     let raw_lines: Vec<&str> = normalized.split('\n').collect();
-
-    // Detect terminal width: most common raw line length (for lines > 40 chars)
     let terminal_width = detect_terminal_width(&raw_lines);
 
     let mut blocks: Vec<String> = Vec::new();
@@ -64,53 +60,17 @@ pub fn ccvv(input: &str) -> String {
     let mut code_fence_indent = String::new();
     let mut prev_raw_line_len: usize = 0;
 
-    let flush_paragraph = |paragraph: &mut Vec<ParagraphLine>, blocks: &mut Vec<String>| {
-        if paragraph.is_empty() {
-            return;
-        }
-        let compacted = compact_paragraph(paragraph);
-        if !compacted.is_empty() {
-            blocks.push(compacted);
-        }
-        paragraph.clear();
-    };
-
-    let flush_code_block = |code_block: &mut Vec<String>, blocks: &mut Vec<String>| {
-        if code_block.is_empty() {
-            return;
-        }
-        blocks.push(code_block.join("\n"));
-        code_block.clear();
-    };
-
     for raw_line in &raw_lines {
-        let mut line = TRAILING_WS_RE.replace(raw_line, "").to_string();
-
-        // Collapse terminal padding and detect excessive leading whitespace
-        let mut excessive_padding = false;
-        if !in_code_fence {
-            let ws = leading_whitespace(&line);
-            let body = &line[ws.len()..];
-            if !body.is_empty() {
-                let collapsed = MULTI_SPACE_RE.replace_all(body, " ").to_string();
-                if ws.len() > 20 {
-                    excessive_padding = true;
-                    line = collapsed;
-                } else {
-                    line = format!("{}{}", ws, collapsed);
-                }
-            }
-        }
+        let (line, excessive_padding) = collapse_padding(raw_line, in_code_fence);
 
         if in_code_fence {
-            if is_code_fence_line(&line) {
-                code_block.push(canonical_fence_line(&line));
-                flush_code_block(&mut code_block, &mut blocks);
-                in_code_fence = false;
-                code_fence_indent = String::new();
-            } else {
-                code_block.push(dedent(&line, &code_fence_indent));
-            }
+            handle_inside_fence(
+                &line,
+                &mut code_block,
+                &mut blocks,
+                &mut in_code_fence,
+                &mut code_fence_indent,
+            );
             continue;
         }
 
@@ -122,49 +82,16 @@ pub fn ccvv(input: &str) -> String {
             continue;
         }
 
-        let mut indent = leading_indent_count(&line);
-        let mut cleaned = LEADING_WS_RE.replace(&line, "").to_string();
+        process_prose_line(
+            &line,
+            excessive_padding,
+            terminal_width,
+            prev_raw_line_len,
+            &mut paragraph,
+            &mut blocks,
+        );
 
-        // Strip recording dot at line start
-        if cleaned.starts_with('\u{23FA}') {
-            cleaned = cleaned.trim_start_matches('\u{23FA}').to_string();
-            cleaned = LEADING_WS_RE.replace(&cleaned, "").to_string();
-        }
-
-        // Adjust indent for sub-bullet markers
-        if RECORDING_DOT_BULLET_RE.is_match(&cleaned) {
-            indent += 2;
-        }
-
-        cleaned = normalize_bullet_marker(&cleaned);
-
-        if cleaned.is_empty() || excessive_padding {
-            flush_paragraph(&mut paragraph, &mut blocks);
-        }
-
-        if !cleaned.is_empty() {
-            // Detect implicit paragraph break in terminal text
-            if terminal_width > 0
-                && !paragraph.is_empty()
-                && prev_raw_line_len > 0
-                && prev_raw_line_len < terminal_width * 85 / 100
-            {
-                if let Some(prev) = paragraph.last() {
-                    if let Some(last_char) = prev.text.chars().last() {
-                        if ".!?:".contains(last_char) && looks_like_paragraph_start(&cleaned) {
-                            flush_paragraph(&mut paragraph, &mut blocks);
-                        }
-                    }
-                }
-            }
-
-            paragraph.push(ParagraphLine {
-                text: cleaned,
-                indent,
-            });
-        }
-
-        prev_raw_line_len = TRAILING_WS_RE.replace(raw_line, "").len();
+        prev_raw_line_len = raw_line.trim_end().chars().count();
     }
 
     flush_paragraph(&mut paragraph, &mut blocks);
@@ -175,6 +102,136 @@ pub fn ccvv(input: &str) -> String {
     blocks.join("\n\n")
 }
 
+fn flush_paragraph(paragraph: &mut Vec<ParagraphLine>, blocks: &mut Vec<String>) {
+    if paragraph.is_empty() {
+        return;
+    }
+    let compacted = compact_paragraph(paragraph);
+    if !compacted.is_empty() {
+        blocks.push(compacted);
+    }
+    paragraph.clear();
+}
+
+fn flush_code_block(code_block: &mut Vec<String>, blocks: &mut Vec<String>) {
+    if code_block.is_empty() {
+        return;
+    }
+    blocks.push(code_block.join("\n"));
+    code_block.clear();
+}
+
+/// Handle a line while inside a code fence: either close the fence or accumulate.
+fn handle_inside_fence(
+    line: &str,
+    code_block: &mut Vec<String>,
+    blocks: &mut Vec<String>,
+    in_code_fence: &mut bool,
+    code_fence_indent: &mut String,
+) {
+    if is_code_fence_line(line) {
+        code_block.push(canonical_fence_line(line));
+        flush_code_block(code_block, blocks);
+        *in_code_fence = false;
+        *code_fence_indent = String::new();
+    } else {
+        code_block.push(dedent(line, code_fence_indent));
+    }
+}
+
+/// Process a prose line: clean markers, check paragraph breaks, accumulate.
+fn process_prose_line(
+    line: &str,
+    excessive_padding: bool,
+    terminal_width: usize,
+    prev_raw_line_len: usize,
+    paragraph: &mut Vec<ParagraphLine>,
+    blocks: &mut Vec<String>,
+) {
+    let (cleaned, indent) = clean_line_markers(line);
+
+    if cleaned.is_empty() || excessive_padding {
+        flush_paragraph(paragraph, blocks);
+    }
+
+    if !cleaned.is_empty() {
+        if should_break_paragraph(paragraph, terminal_width, prev_raw_line_len, &cleaned) {
+            flush_paragraph(paragraph, blocks);
+        }
+        paragraph.push(ParagraphLine {
+            text: cleaned,
+            indent,
+        });
+    }
+}
+
+/// Collapse terminal padding and detect excessive leading whitespace.
+fn collapse_padding(raw_line: &str, in_code_fence: bool) -> (String, bool) {
+    if in_code_fence {
+        return (raw_line.to_string(), false);
+    }
+
+    let line = raw_line.trim_end().to_string();
+    let mut excessive_padding = false;
+
+    let ws = leading_whitespace(&line);
+    let body = &line[ws.len()..];
+    if body.is_empty() {
+        return (line, false);
+    }
+
+    let collapsed = MULTI_SPACE_RE.replace_all(body, " ").to_string();
+    let result = if ws.len() > 20 {
+        excessive_padding = true;
+        collapsed
+    } else {
+        format!("{}{}", ws, collapsed)
+    };
+
+    (result, excessive_padding)
+}
+
+/// Strip recording dot, normalize bullets, compute indent.
+fn clean_line_markers(line: &str) -> (String, usize) {
+    let mut indent = leading_indent_count(line);
+    let mut cleaned = line.trim_start().to_string();
+
+    if cleaned.starts_with('\u{23FA}') {
+        cleaned = cleaned
+            .trim_start_matches('\u{23FA}')
+            .trim_start()
+            .to_string();
+    }
+
+    if RECORDING_DOT_BULLET_RE.is_match(&cleaned) {
+        indent += 2;
+    }
+
+    cleaned = normalize_bullet_marker(&cleaned);
+    (cleaned, indent)
+}
+
+/// Check if the current line should trigger a paragraph flush.
+fn should_break_paragraph(
+    paragraph: &[ParagraphLine],
+    terminal_width: usize,
+    prev_raw_line_len: usize,
+    cleaned: &str,
+) -> bool {
+    if terminal_width == 0 || paragraph.is_empty() || prev_raw_line_len == 0 {
+        return false;
+    }
+    if prev_raw_line_len >= terminal_width * 85 / 100 {
+        return false;
+    }
+    if let Some(prev) = paragraph.last() {
+        if let Some(last_char) = prev.text.chars().last() {
+            return ".!?:".contains(last_char) && looks_like_paragraph_start(cleaned);
+        }
+    }
+    false
+}
+
 /// Detect terminal width from raw line lengths.
 fn detect_terminal_width(raw_lines: &[&str]) -> usize {
     let raw_lengths: Vec<usize> = raw_lines
@@ -183,8 +240,7 @@ fn detect_terminal_width(raw_lines: &[&str]) -> usize {
         .filter(|&len| len > 40)
         .collect();
 
-    let mut length_counts: std::collections::HashMap<usize, usize> =
-        std::collections::HashMap::new();
+    let mut length_counts: HashMap<usize, usize> = HashMap::new();
     for &len in &raw_lengths {
         *length_counts.entry(len).or_insert(0) += 1;
     }
