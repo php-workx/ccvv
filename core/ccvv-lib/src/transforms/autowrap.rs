@@ -209,6 +209,12 @@ pub fn should_wrap_code_token(token: &str) -> bool {
 
 fn looks_like_path(token: &str) -> bool {
     token.contains('/')
+        && (token.starts_with('/')
+            || token.starts_with("./")
+            || token.starts_with("../")
+            || token.contains('.')
+            || token.contains('-')
+            || token.contains(':'))
 }
 
 fn looks_like_code_identifier(token: &str) -> bool {
