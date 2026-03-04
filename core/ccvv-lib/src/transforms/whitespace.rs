@@ -3,8 +3,8 @@
 //! Port of the Swift `ccvv()` function from `mac/main.swift:11-209`.
 //! See §5.4 Stage 3 of the technical spec.
 
-use std::collections::HashMap;
 use regex::Regex;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use super::{Transform, TransformContext};
@@ -64,7 +64,13 @@ pub fn ccvv(input: &str) -> String {
         let (line, excessive_padding) = collapse_padding(raw_line, in_code_fence);
 
         if in_code_fence {
-            handle_inside_fence(&line, &mut code_block, &mut blocks, &mut in_code_fence, &mut code_fence_indent);
+            handle_inside_fence(
+                &line,
+                &mut code_block,
+                &mut blocks,
+                &mut in_code_fence,
+                &mut code_fence_indent,
+            );
             continue;
         }
 
@@ -77,11 +83,15 @@ pub fn ccvv(input: &str) -> String {
         }
 
         process_prose_line(
-            &line, excessive_padding, terminal_width, prev_raw_line_len,
-            &mut paragraph, &mut blocks,
+            &line,
+            excessive_padding,
+            terminal_width,
+            prev_raw_line_len,
+            &mut paragraph,
+            &mut blocks,
         );
 
-        prev_raw_line_len = raw_line.trim_end().len();
+        prev_raw_line_len = raw_line.trim_end().chars().count();
     }
 
     flush_paragraph(&mut paragraph, &mut blocks);
@@ -157,24 +167,28 @@ fn process_prose_line(
 
 /// Collapse terminal padding and detect excessive leading whitespace.
 fn collapse_padding(raw_line: &str, in_code_fence: bool) -> (String, bool) {
-    let mut line = raw_line.trim_end().to_string();
-    let mut excessive_padding = false;
-
-    if !in_code_fence {
-        let ws = leading_whitespace(&line);
-        let body = &line[ws.len()..];
-        if !body.is_empty() {
-            let collapsed = MULTI_SPACE_RE.replace_all(body, " ").to_string();
-            if ws.len() > 20 {
-                excessive_padding = true;
-                line = collapsed;
-            } else {
-                line = format!("{}{}", ws, collapsed);
-            }
-        }
+    if in_code_fence {
+        return (raw_line.to_string(), false);
     }
 
-    (line, excessive_padding)
+    let line = raw_line.trim_end().to_string();
+    let mut excessive_padding = false;
+
+    let ws = leading_whitespace(&line);
+    let body = &line[ws.len()..];
+    if body.is_empty() {
+        return (line, false);
+    }
+
+    let collapsed = MULTI_SPACE_RE.replace_all(body, " ").to_string();
+    let result = if ws.len() > 20 {
+        excessive_padding = true;
+        collapsed
+    } else {
+        format!("{}{}", ws, collapsed)
+    };
+
+    (result, excessive_padding)
 }
 
 /// Strip recording dot, normalize bullets, compute indent.
@@ -183,7 +197,10 @@ fn clean_line_markers(line: &str) -> (String, usize) {
     let mut cleaned = line.trim_start().to_string();
 
     if cleaned.starts_with('\u{23FA}') {
-        cleaned = cleaned.trim_start_matches('\u{23FA}').trim_start().to_string();
+        cleaned = cleaned
+            .trim_start_matches('\u{23FA}')
+            .trim_start()
+            .to_string();
     }
 
     if RECORDING_DOT_BULLET_RE.is_match(&cleaned) {

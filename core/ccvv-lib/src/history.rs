@@ -536,17 +536,11 @@ mod tests {
         let path = temp_db_path();
         let db = HistoryDb::open(&path).unwrap();
 
-        let id1 = db
-            .prepare("raw1", "100% complete", None, false)
-            .unwrap();
+        let id1 = db.prepare("raw1", "100% complete", None, false).unwrap();
         db.commit_entry(id1).unwrap();
-        let id2 = db
-            .prepare("raw2", "user_name is set", None, false)
-            .unwrap();
+        let id2 = db.prepare("raw2", "user_name is set", None, false).unwrap();
         db.commit_entry(id2).unwrap();
-        let id3 = db
-            .prepare("raw3", "unrelated text", None, false)
-            .unwrap();
+        let id3 = db.prepare("raw3", "unrelated text", None, false).unwrap();
         db.commit_entry(id3).unwrap();
 
         // Searching for literal "%" should only match the entry containing "%"

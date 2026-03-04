@@ -4,8 +4,8 @@
 //! JSON, or mixed. Used by the pipeline and history system.
 //! See §7 of the technical spec.
 
-use crate::transforms::ContentType;
 use crate::table_extract::extract_table;
+use crate::transforms::ContentType;
 
 /// Classify the content type of the given text.
 pub fn classify(text: &str) -> ContentType {

@@ -3,8 +3,8 @@
 //! Parses terminal box tables, markdown pipe tables, and delimiter tables
 //! into a canonical row/column matrix.
 
-use std::collections::HashMap;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -166,8 +166,7 @@ fn insert_newlines_around_inline_borders(input: &str) -> String {
             .expect("valid regex for inline border split before")
     });
     let after_re = AFTER_BORDER_RE.get_or_init(|| {
-        regex::Regex::new(r"([┤┼┘┐])\s+([│|])")
-            .expect("valid regex for inline border split after")
+        regex::Regex::new(r"([┤┼┘┐])\s+([│|])").expect("valid regex for inline border split after")
     });
 
     let stage1 = before_re.replace_all(input, "$1\n$2").to_string();
@@ -207,9 +206,7 @@ fn detect_box_column_hint(input: &str) -> Option<usize> {
         if trimmed.is_empty() {
             continue;
         }
-        let has_box = trimmed
-            .chars()
-            .any(|c| "┌┐└┘├┤┬┴┼─╭╮╰╯═╪║╞╡╟╢".contains(c));
+        let has_box = trimmed.chars().any(|c| "┌┐└┘├┤┬┴┼─╭╮╰╯═╪║╞╡╟╢".contains(c));
         let has_text = trimmed.chars().any(char::is_alphanumeric);
         if !has_box || has_text {
             continue;
@@ -240,7 +237,7 @@ fn split_row_chunks_by_bar_groups(line: &str, cols_hint: Option<usize>) -> Vec<S
     if bars.len() < bars_per_row * 2 {
         return Vec::new();
     }
-    if !bars.len().is_multiple_of(bars_per_row) {
+    if bars.len() % bars_per_row != 0 {
         return Vec::new();
     }
 
@@ -443,7 +440,8 @@ fn parse_terminal_box(input: &str) -> Option<ParseCandidate> {
         return None;
     }
 
-    let confidence = calculate_box_confidence(saw_separator, cell_lines, rows.len(), warnings.len());
+    let confidence =
+        calculate_box_confidence(saw_separator, cell_lines, rows.len(), warnings.len());
 
     Some(ParseCandidate {
         format: TableFormat::Terminal,
@@ -453,7 +451,11 @@ fn parse_terminal_box(input: &str) -> Option<ParseCandidate> {
     })
 }
 
-fn normalize_cell_count(cells: Vec<String>, expected: usize, warnings: &mut Vec<String>) -> Vec<String> {
+fn normalize_cell_count(
+    cells: Vec<String>,
+    expected: usize,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
     let mut normalized = cells;
     if normalized.len() != expected {
         warnings.push(format!(
@@ -470,7 +472,11 @@ fn normalize_cell_count(cells: Vec<String>, expected: usize, warnings: &mut Vec<
     normalized
 }
 
-fn merge_cell_continuation(current: &mut Option<Vec<String>>, cells: Vec<String>, expected_cols: usize) {
+fn merge_cell_continuation(
+    current: &mut Option<Vec<String>>,
+    cells: Vec<String>,
+    expected_cols: usize,
+) {
     if current.is_none() {
         *current = Some(vec![String::new(); expected_cols]);
     }
@@ -488,7 +494,12 @@ fn merge_cell_continuation(current: &mut Option<Vec<String>>, cells: Vec<String>
     }
 }
 
-fn calculate_box_confidence(saw_separator: bool, cell_lines: usize, rows_len: usize, warnings_len: usize) -> f32 {
+fn calculate_box_confidence(
+    saw_separator: bool,
+    cell_lines: usize,
+    rows_len: usize,
+    warnings_len: usize,
+) -> f32 {
     let mut confidence = 0.72f32;
     if saw_separator {
         confidence += 0.12;
@@ -514,7 +525,10 @@ fn normalize_box_lines_for_clipped_edges(lines: &[&str]) -> Vec<String> {
         }
     }
 
-    let expected_bars = freq.iter().max_by_key(|(_, count)| *count).map(|(bars, _)| *bars);
+    let expected_bars = freq
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(bars, _)| *bars);
     let Some(expected_bars) = expected_bars else {
         return lines.iter().map(|line| (*line).to_string()).collect();
     };
@@ -693,7 +707,10 @@ fn parse_delimited(input: &str) -> Option<ParseCandidate> {
     let mut best: Option<ParseCandidate> = None;
     for delimiter in ['\t', ',', ';'] {
         if let Some(candidate) = try_delimiter(&lines, delimiter) {
-            if best.as_ref().is_none_or(|b| candidate.confidence > b.confidence) {
+            if best
+                .as_ref()
+                .is_none_or(|b| candidate.confidence > b.confidence)
+            {
                 best = Some(candidate);
             }
         }
@@ -865,16 +882,18 @@ mod tests {
         assert!(parsed.detected, "expected detection, got: {:?}", parsed);
         assert_eq!(parsed.format, Some(TableFormat::Terminal));
         assert!(
-            parsed.rows
-                .iter()
-                .any(|r| r.get(0).map(|v| v.contains("Memory snapshot")).unwrap_or(false)),
+            parsed.rows.iter().any(|r| r
+                .first()
+                .map(|v| v.contains("Memory snapshot"))
+                .unwrap_or(false)),
             "rows: {:?}",
             parsed.rows
         );
         assert!(
-            parsed.rows
-                .iter()
-                .any(|r| r.get(1).map(|v| v.contains("Modal infra updates")).unwrap_or(false)),
+            parsed.rows.iter().any(|r| r
+                .get(1)
+                .map(|v| v.contains("Modal infra updates"))
+                .unwrap_or(false)),
             "rows: {:?}",
             parsed.rows
         );
@@ -896,8 +915,9 @@ mod tests {
             parsed.rows
         );
         assert!(
-            parsed.rows[0][1]
-                .contains("Port 8080 SG rule removed entirely (open: false on phpMyAdmin listener)"),
+            parsed.rows[0][1].contains(
+                "Port 8080 SG rule removed entirely (open: false on phpMyAdmin listener)"
+            ),
             "rows: {:?}",
             parsed.rows
         );
@@ -919,8 +939,9 @@ production-web-server │ Port 8080 SG rule removed entirely (open: false   │
             parsed.rows
         );
         assert!(
-            parsed.rows[0][1]
-                .contains("Port 8080 SG rule removed entirely (open: false on phpMyAdmin listener)"),
+            parsed.rows[0][1].contains(
+                "Port 8080 SG rule removed entirely (open: false on phpMyAdmin listener)"
+            ),
             "rows: {:?}",
             parsed.rows
         );

@@ -247,11 +247,8 @@ mod tests {
         // Two doublers: stage1 produces 2x, stage2 produces 4x from original.
         // With max_output_ratio=3.0, the first doubler passes (2x <= 3.0)
         // but the second should trip it (4x > 3.0).
-        let pipeline = Pipeline::new(vec![
-            Box::new(DoublerTransform),
-            Box::new(DoublerTransform),
-        ])
-        .with_max_output_ratio(3.0);
+        let pipeline = Pipeline::new(vec![Box::new(DoublerTransform), Box::new(DoublerTransform)])
+            .with_max_output_ratio(3.0);
         let input = "hello";
         let (result, _ctx) = pipeline.run(input);
         // Should return original since cumulative expansion (4x) exceeds 3.0x

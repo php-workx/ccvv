@@ -47,12 +47,12 @@ shellcheck:
   #!/usr/bin/env bash
   set -euo pipefail
   command -v shellcheck >/dev/null 2>&1 || { echo "shellcheck not found. Install: brew install shellcheck"; exit 1; }
-  scripts="$(rg --files -g '*.sh' || find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*')"
-  if [ -z "$scripts" ]; then
+  mapfile -t scripts < <(find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*')
+  if [ ${#scripts[@]} -eq 0 ]; then
     echo "No shell scripts found."
     exit 0
   fi
-  shellcheck $scripts
+  shellcheck -- "${scripts[@]}"
 
 # Dependency vulnerability audit.
 audit:
@@ -66,7 +66,7 @@ coverage:
   #!/usr/bin/env bash
   set -euo pipefail
   command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
-  cd core && cargo llvm-cov --workspace --lcov --output-path target/coverage/lcov.info
+  cd core && mkdir -p target/coverage && cargo llvm-cov --workspace --lcov --output-path target/coverage/lcov.info
 
 # Generate HTML coverage report.
 coverage-html:

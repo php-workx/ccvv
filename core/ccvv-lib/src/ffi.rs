@@ -382,8 +382,7 @@ where
 
     let tmp_path = path.with_extension("toml.tmp");
     let content_bytes = doc.to_string();
-    let file =
-        std::fs::File::create(&tmp_path).map_err(|e| format!("create tmp error: {}", e))?;
+    let file = std::fs::File::create(&tmp_path).map_err(|e| format!("create tmp error: {}", e))?;
     {
         use std::io::Write;
         let mut writer = std::io::BufWriter::new(file);
@@ -728,7 +727,12 @@ static TIMING_SAMPLES: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// Record a timing sample (interval in ms between double-taps).
 #[no_mangle]
 pub extern "C" fn ccvv_timing_record_sample(interval_ms: u32) {
-    let mut samples = TIMING_SAMPLES.lock().expect("TIMING_SAMPLES mutex poisoned");
+    let Ok(mut samples) = TIMING_SAMPLES
+        .lock()
+        .or_else(|e| Ok::<_, ()>(e.into_inner()))
+    else {
+        return;
+    };
     samples.push(interval_ms);
     // Keep only last 100 samples
     if samples.len() > 100 {
@@ -741,7 +745,12 @@ pub extern "C" fn ccvv_timing_record_sample(interval_ms: u32) {
 /// Returns 0 if not enough samples to compute (falls back to config).
 #[no_mangle]
 pub extern "C" fn ccvv_timing_get_threshold_ms() -> u32 {
-    let samples = TIMING_SAMPLES.lock().expect("TIMING_SAMPLES mutex poisoned");
+    let Ok(samples) = TIMING_SAMPLES
+        .lock()
+        .or_else(|e| Ok::<_, ()>(e.into_inner()))
+    else {
+        return 0;
+    };
     if samples.len() < 10 {
         return 0;
     }

@@ -139,7 +139,7 @@ impl StructuralTransform {
         let col_counts: Vec<usize> = split_lines.iter().map(|row| row.len()).collect();
 
         // Find the most common column count
-        let mut freq = std::collections::HashMap::<usize, usize>::new();
+        let mut freq = std::collections::HashMap::new();
         for &count in &col_counts {
             *freq.entry(count).or_insert(0) += 1;
         }
@@ -171,7 +171,8 @@ impl StructuralTransform {
         // Header inference: first row is header if values are distinct and < 80% numeric
         let header = &rows[0];
         let is_header = {
-            let unique: std::collections::HashSet<&str> = header.iter().map(|s| s.as_str()).collect();
+            let unique: std::collections::HashSet<&str> =
+                header.iter().map(|s| s.as_str()).collect();
             let distinct = unique.len() == header.len();
             let numeric_count = header
                 .iter()

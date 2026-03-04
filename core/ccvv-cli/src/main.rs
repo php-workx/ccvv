@@ -389,7 +389,8 @@ fn build_pipeline(cli: &Cli) -> Pipeline {
     .unwrap_or_default();
     let resolved = resolve_config(&config, cli.profile.as_deref()).unwrap_or_default();
 
-    let selective = cli.strip_urls || cli.normalize || cli.unwrap || cli.prettify_json;
+    let selective =
+        cli.strip_urls || cli.normalize || cli.unwrap || cli.prettify_json || cli.flatten_json;
     let stages = if selective {
         build_selective_stages(cli)
     } else {
@@ -409,7 +410,7 @@ fn build_selective_stages(cli: &Cli) -> Vec<Box<dyn Transform>> {
     if cli.unwrap {
         stages.push(Box::new(WhitespaceTransform::new()));
     }
-    if cli.prettify_json {
+    if cli.prettify_json || cli.flatten_json {
         stages.push(Box::new(StructuralTransform::new()));
     }
     if cli.strip_urls {

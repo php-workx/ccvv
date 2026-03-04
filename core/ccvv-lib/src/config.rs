@@ -336,8 +336,7 @@ pub fn resolve_config(
     }
 
     let compiled_rules = compile_user_rules(config)?;
-    let (url_global_deny, url_domain_overrides, exclusion_bundle_ids) =
-        merge_deny_lists(config);
+    let (url_global_deny, url_domain_overrides, exclusion_bundle_ids) = merge_deny_lists(config);
 
     // Validate settings ranges
     if settings.max_input_bytes == 0 {

@@ -169,7 +169,7 @@ impl UrlTransform {
         let domain = parsed.host_str().map(|h| h.to_string());
 
         let mut new_url = parsed.clone();
-        self.strip_www_from_url(&mut new_url, url_str);
+        self.strip_www_from_url(&mut new_url);
         self.filter_query_params(&mut new_url, domain.as_deref());
 
         let mut result = new_url.to_string();
@@ -183,16 +183,13 @@ impl UrlTransform {
         Some(result)
     }
 
-    fn strip_www_from_url(&self, new_url: &mut url::Url, url_str: &str) {
+    fn strip_www_from_url(&self, new_url: &mut url::Url) {
         if !self.strip_www {
             return;
         }
         if let Some(host) = new_url.host_str().map(|h| h.to_string()) {
             if let Some(stripped) = host.strip_prefix("www.") {
-                if let Ok(mut u) = url::Url::parse(url_str) {
-                    let _ = u.set_host(Some(stripped));
-                    *new_url = u;
-                }
+                let _ = new_url.set_host(Some(stripped));
             }
         }
     }
