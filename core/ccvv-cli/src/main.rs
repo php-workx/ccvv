@@ -381,7 +381,6 @@ fn read_stdin() -> String {
 
 /// Build a pipeline based on CLI flags.
 fn build_pipeline(cli: &Cli) -> Pipeline {
-    // Load config
     let config = load_config(
         cli.config
             .as_ref()
@@ -390,58 +389,61 @@ fn build_pipeline(cli: &Cli) -> Pipeline {
     .unwrap_or_default();
     let resolved = resolve_config(&config, cli.profile.as_deref()).unwrap_or_default();
 
-    // If specific stages requested, use selective mode
     let selective = cli.strip_urls || cli.normalize || cli.unwrap || cli.prettify_json;
-
-    if selective {
-        let mut stages: Vec<Box<dyn Transform>> = Vec::new();
-        if cli.normalize {
-            stages.push(Box::new(NormalizeTransform::new()));
-        }
-        if cli.unwrap {
-            stages.push(Box::new(WhitespaceTransform::new()));
-        }
-        if cli.prettify_json {
-            stages.push(Box::new(StructuralTransform::new()));
-        }
-        if cli.strip_urls {
-            stages.push(Box::new(UrlTransform::new()));
-        }
-        Pipeline::new(stages)
-            .with_max_input_bytes(resolved.settings.max_input_bytes)
-            .with_sensitive_filter(resolved.settings.sensitive_filter)
+    let stages = if selective {
+        build_selective_stages(cli)
     } else {
-        // Full pipeline from config
-        let mut stages: Vec<Box<dyn Transform>> = Vec::new();
+        build_full_stages(&resolved)
+    };
 
-        if resolved.settings.normalize_unicode {
-            stages.push(Box::new(NormalizeTransform::new()));
-        }
-        if resolved.settings.whitespace_cleanup {
-            stages.push(Box::new(WhitespaceTransform::new()));
-        }
-        if resolved.settings.agent_strip {
-            stages.push(Box::new(AgentTransform::new()));
-        }
-        if resolved.settings.structural_detection {
-            stages.push(Box::new(StructuralTransform::new()));
-        }
-        if resolved.settings.url_cleaning {
-            stages.push(Box::new(
-                UrlTransform::new().with_strip_scheme(resolved.settings.url_strip_scheme),
-            ));
-        }
-        if resolved.settings.auto_wrapper {
-            stages.push(Box::new(AutowrapTransform::new()));
-        }
-        if resolved.settings.user_rules && !resolved.compiled_rules.is_empty() {
-            stages.push(Box::new(UserRulesTransform::with_rules(
-                resolved.compiled_rules.clone(),
-            )));
-        }
+    Pipeline::new(stages)
+        .with_max_input_bytes(resolved.settings.max_input_bytes)
+        .with_sensitive_filter(resolved.settings.sensitive_filter)
+}
 
-        Pipeline::new(stages)
-            .with_max_input_bytes(resolved.settings.max_input_bytes)
-            .with_sensitive_filter(resolved.settings.sensitive_filter)
+fn build_selective_stages(cli: &Cli) -> Vec<Box<dyn Transform>> {
+    let mut stages: Vec<Box<dyn Transform>> = Vec::new();
+    if cli.normalize {
+        stages.push(Box::new(NormalizeTransform::new()));
     }
+    if cli.unwrap {
+        stages.push(Box::new(WhitespaceTransform::new()));
+    }
+    if cli.prettify_json {
+        stages.push(Box::new(StructuralTransform::new()));
+    }
+    if cli.strip_urls {
+        stages.push(Box::new(UrlTransform::new()));
+    }
+    stages
+}
+
+fn build_full_stages(resolved: &ccvv_lib::config::ResolvedConfig) -> Vec<Box<dyn Transform>> {
+    let mut stages: Vec<Box<dyn Transform>> = Vec::new();
+    if resolved.settings.normalize_unicode {
+        stages.push(Box::new(NormalizeTransform::new()));
+    }
+    if resolved.settings.whitespace_cleanup {
+        stages.push(Box::new(WhitespaceTransform::new()));
+    }
+    if resolved.settings.agent_strip {
+        stages.push(Box::new(AgentTransform::new()));
+    }
+    if resolved.settings.structural_detection {
+        stages.push(Box::new(StructuralTransform::new()));
+    }
+    if resolved.settings.url_cleaning {
+        stages.push(Box::new(
+            UrlTransform::new().with_strip_scheme(resolved.settings.url_strip_scheme),
+        ));
+    }
+    if resolved.settings.auto_wrapper {
+        stages.push(Box::new(AutowrapTransform::new()));
+    }
+    if resolved.settings.user_rules && !resolved.compiled_rules.is_empty() {
+        stages.push(Box::new(UserRulesTransform::with_rules(
+            resolved.compiled_rules.clone(),
+        )));
+    }
+    stages
 }

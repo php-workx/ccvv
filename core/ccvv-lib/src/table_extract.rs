@@ -271,13 +271,7 @@ fn parse_aligned_pipe_columns(input: &str) -> Option<ParseCandidate> {
         return None;
     }
 
-    let mut bars_by_line: Vec<(&str, Vec<usize>)> = Vec::new();
-    for line in &lines {
-        let bars = bar_positions(line);
-        if bars.len() >= 3 {
-            bars_by_line.push((line, bars));
-        }
-    }
+    let bars_by_line = find_bar_positions(&lines);
     if bars_by_line.len() < 2 {
         return None;
     }
@@ -300,22 +294,59 @@ fn parse_aligned_pipe_columns(input: &str) -> Option<ParseCandidate> {
         return None;
     }
 
-    // Constant visual column boundaries: each bar slot should be near same position.
+    if !check_slot_alignment(&aligned_candidates, bar_count) {
+        return None;
+    }
+
+    let rows = extract_pipe_rows(&aligned_candidates);
+    if rows.len() < 2 {
+        return None;
+    }
+
+    if !has_multi_column_content(&rows) {
+        return None;
+    }
+
+    let confidence = calculate_pipe_confidence(&aligned_candidates, input);
+
+    Some(ParseCandidate {
+        format: TableFormat::Terminal,
+        confidence,
+        rows,
+        warnings: vec!["inferred table from aligned pipe columns".to_string()],
+    })
+}
+
+fn find_bar_positions<'a>(lines: &[&'a str]) -> Vec<(&'a str, Vec<usize>)> {
+    let mut result = Vec::new();
+    for line in lines {
+        let bars = bar_positions(line);
+        if bars.len() >= 3 {
+            result.push((*line, bars));
+        }
+    }
+    result
+}
+
+fn check_slot_alignment(candidates: &[(&str, &Vec<usize>)], bar_count: usize) -> bool {
     const SLOT_DRIFT_TOLERANCE: usize = 6;
     for slot in 0..bar_count {
         let mut min_pos = usize::MAX;
         let mut max_pos = 0usize;
-        for (_, bars) in &aligned_candidates {
+        for (_, bars) in candidates {
             min_pos = min_pos.min(bars[slot]);
             max_pos = max_pos.max(bars[slot]);
         }
         if max_pos.saturating_sub(min_pos) > SLOT_DRIFT_TOLERANCE {
-            return None;
+            return false;
         }
     }
+    true
+}
 
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for (line, _) in &aligned_candidates {
+fn extract_pipe_rows(candidates: &[(&str, &Vec<usize>)]) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for (line, _) in candidates {
         if is_box_separator_line(line) {
             continue;
         }
@@ -325,47 +356,35 @@ fn parse_aligned_pipe_columns(input: &str) -> Option<ParseCandidate> {
             }
         }
     }
-    if rows.len() < 2 {
-        return None;
-    }
+    rows
+}
 
-    // Require content in at least two distinct columns to avoid false positives.
+fn has_multi_column_content(rows: &[Vec<String>]) -> bool {
     let col_count = rows.iter().map(|r| r.len()).max().unwrap_or(0);
     if col_count < 2 {
-        return None;
+        return false;
     }
-    let mut cols_with_text = 0usize;
-    for c in 0..col_count {
-        if rows
-            .iter()
-            .any(|row| row.get(c).map(|v| !v.trim().is_empty()).unwrap_or(false))
-        {
-            cols_with_text += 1;
-        }
-    }
-    if cols_with_text < 2 {
-        return None;
-    }
+    let cols_with_text = (0..col_count)
+        .filter(|&c| {
+            rows.iter()
+                .any(|row| row.get(c).map(|v| !v.trim().is_empty()).unwrap_or(false))
+        })
+        .count();
+    cols_with_text >= 2
+}
 
+fn calculate_pipe_confidence(candidates: &[(&str, &Vec<usize>)], input: &str) -> f32 {
     let mut confidence = 0.68f32;
-    if aligned_candidates.len() >= 3 {
+    if candidates.len() >= 3 {
         confidence += 0.05;
     }
     if input.contains('│') {
         confidence += 0.03;
     }
     if input.contains('├') || input.contains('┼') || input.contains('┤') {
-        // If explicit border separators exist, prefer dedicated box-table parsers.
         confidence -= 0.06;
     }
-    confidence = confidence.clamp(0.0, 0.99);
-
-    Some(ParseCandidate {
-        format: TableFormat::Terminal,
-        confidence,
-        rows,
-        warnings: vec!["inferred table from aligned pipe columns".to_string()],
-    })
+    confidence.clamp(0.0, 0.99)
 }
 
 fn bar_positions(line: &str) -> Vec<usize> {
@@ -410,36 +429,8 @@ fn parse_terminal_box(input: &str) -> Option<ParseCandidate> {
             expected_cols = cells.len();
         }
 
-        let mut normalized = cells;
-        if normalized.len() != expected_cols {
-            warnings.push(format!(
-                "line had {} columns, expected {}",
-                normalized.len(),
-                expected_cols
-            ));
-            if normalized.len() > expected_cols {
-                normalized.truncate(expected_cols);
-            } else {
-                normalized.resize(expected_cols, String::new());
-            }
-        }
-
-        if current.is_none() {
-            current = Some(vec![String::new(); expected_cols]);
-        }
-
-        if let Some(cur) = current.as_mut() {
-            for (idx, part) in normalized.iter().enumerate() {
-                let value = part.trim();
-                if value.is_empty() {
-                    continue;
-                }
-                if !cur[idx].is_empty() {
-                    cur[idx].push(' ');
-                }
-                cur[idx].push_str(value);
-            }
-        }
+        let normalized = normalize_cell_count(cells, expected_cols, &mut warnings);
+        merge_cell_continuation(&mut current, normalized, expected_cols);
     }
     finalize_row(&mut rows, &mut current);
 
@@ -448,22 +439,11 @@ fn parse_terminal_box(input: &str) -> Option<ParseCandidate> {
         return None;
     }
 
-    // Accept a single wrapped row as a table candidate when there is enough structure.
     if rows.len() == 1 && !saw_separator && cell_lines < 2 {
         return None;
     }
 
-    let mut confidence = 0.72f32;
-    if saw_separator {
-        confidence += 0.12;
-    }
-    if cell_lines >= rows.len() {
-        confidence += 0.08;
-    }
-    if !warnings.is_empty() {
-        confidence -= 0.1;
-    }
-    confidence = confidence.clamp(0.0, 0.99);
+    let confidence = calculate_box_confidence(saw_separator, cell_lines, rows.len(), warnings.len());
 
     Some(ParseCandidate {
         format: TableFormat::Terminal,
@@ -471,6 +451,55 @@ fn parse_terminal_box(input: &str) -> Option<ParseCandidate> {
         rows,
         warnings,
     })
+}
+
+fn normalize_cell_count(cells: Vec<String>, expected: usize, warnings: &mut Vec<String>) -> Vec<String> {
+    let mut normalized = cells;
+    if normalized.len() != expected {
+        warnings.push(format!(
+            "line had {} columns, expected {}",
+            normalized.len(),
+            expected
+        ));
+        if normalized.len() > expected {
+            normalized.truncate(expected);
+        } else {
+            normalized.resize(expected, String::new());
+        }
+    }
+    normalized
+}
+
+fn merge_cell_continuation(current: &mut Option<Vec<String>>, cells: Vec<String>, expected_cols: usize) {
+    if current.is_none() {
+        *current = Some(vec![String::new(); expected_cols]);
+    }
+    if let Some(cur) = current.as_mut() {
+        for (idx, part) in cells.iter().enumerate() {
+            let value = part.trim();
+            if value.is_empty() {
+                continue;
+            }
+            if !cur[idx].is_empty() {
+                cur[idx].push(' ');
+            }
+            cur[idx].push_str(value);
+        }
+    }
+}
+
+fn calculate_box_confidence(saw_separator: bool, cell_lines: usize, rows_len: usize, warnings_len: usize) -> f32 {
+    let mut confidence = 0.72f32;
+    if saw_separator {
+        confidence += 0.12;
+    }
+    if cell_lines >= rows_len {
+        confidence += 0.08;
+    }
+    if warnings_len > 0 {
+        confidence -= 0.1;
+    }
+    confidence.clamp(0.0, 0.99)
 }
 
 fn normalize_box_lines_for_clipped_edges(lines: &[&str]) -> Vec<String> {
@@ -663,60 +692,52 @@ fn parse_delimited(input: &str) -> Option<ParseCandidate> {
 
     let mut best: Option<ParseCandidate> = None;
     for delimiter in ['\t', ',', ';'] {
-        let split_lines: Vec<Vec<String>> = lines
-            .iter()
-            .map(|line| split_csv_line(line, delimiter))
-            .collect();
-        if split_lines.is_empty() {
-            continue;
-        }
-
-        let mut freq: HashMap<usize, usize> = HashMap::new();
-        for row in &split_lines {
-            *freq.entry(row.len()).or_insert(0) += 1;
-        }
-        let Some((&most_common_cols, &count)) = freq.iter().max_by_key(|(_, c)| *c) else {
-            continue;
-        };
-        if most_common_cols < 2 {
-            continue;
-        }
-        if count * 100 / split_lines.len() < 80 {
-            continue;
-        }
-
-        let rows: Vec<Vec<String>> = split_lines
-            .into_iter()
-            .filter(|row| row.len() == most_common_cols)
-            .collect();
-        if rows.len() < 2 {
-            continue;
-        }
-
-        let confidence = match delimiter {
-            '\t' => 0.92,
-            ',' => 0.84,
-            ';' => 0.83,
-            _ => 0.8,
-        };
-
-        let candidate = ParseCandidate {
-            format: TableFormat::Delimiter,
-            confidence,
-            rows,
-            warnings: Vec::new(),
-        };
-
-        if let Some(existing) = &best {
-            if candidate.confidence > existing.confidence {
+        if let Some(candidate) = try_delimiter(&lines, delimiter) {
+            if best.as_ref().is_none_or(|b| candidate.confidence > b.confidence) {
                 best = Some(candidate);
             }
-        } else {
-            best = Some(candidate);
         }
     }
 
     best
+}
+
+fn try_delimiter(lines: &[&str], delimiter: char) -> Option<ParseCandidate> {
+    let split_lines: Vec<Vec<String>> = lines
+        .iter()
+        .map(|line| split_csv_line(line, delimiter))
+        .collect();
+
+    let mut freq: HashMap<usize, usize> = HashMap::new();
+    for row in &split_lines {
+        *freq.entry(row.len()).or_insert(0) += 1;
+    }
+    let (&most_common_cols, &count) = freq.iter().max_by_key(|(_, c)| *c)?;
+    if most_common_cols < 2 || count * 100 / split_lines.len() < 80 {
+        return None;
+    }
+
+    let rows: Vec<Vec<String>> = split_lines
+        .into_iter()
+        .filter(|row| row.len() == most_common_cols)
+        .collect();
+    if rows.len() < 2 {
+        return None;
+    }
+
+    let confidence = match delimiter {
+        '\t' => 0.92,
+        ',' => 0.84,
+        ';' => 0.83,
+        _ => 0.8,
+    };
+
+    Some(ParseCandidate {
+        format: TableFormat::Delimiter,
+        confidence,
+        rows,
+        warnings: Vec::new(),
+    })
 }
 
 pub fn split_csv_line(line: &str, delimiter: char) -> Vec<String> {

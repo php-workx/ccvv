@@ -12,3 +12,4 @@ core/target/
 .idea
 firebase-debug.log
 /.sonarqube/
+/.scannerwork/
