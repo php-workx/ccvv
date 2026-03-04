@@ -74,6 +74,12 @@ impl UrlTransform {
         self.domain_overrides = overrides;
         self
     }
+
+    /// Append extra deny parameters (from config `url_global_deny`).
+    pub fn with_extra_deny_params(mut self, extra: Vec<String>) -> Self {
+        self.deny_params.extend(extra);
+        self
+    }
 }
 
 impl Default for UrlTransform {
@@ -166,10 +172,10 @@ impl UrlTransform {
     /// Clean a single URL: strip tracking params, normalize host.
     fn clean_url(&self, url_str: &str) -> Option<String> {
         let parsed = url::Url::parse(url_str).ok()?;
-        let domain = parsed.host_str().map(|h| h.to_string());
 
         let mut new_url = parsed.clone();
         self.strip_www_from_url(&mut new_url);
+        let domain = new_url.host_str().map(|h| h.to_string());
         self.filter_query_params(&mut new_url, domain.as_deref());
 
         let mut result = new_url.to_string();

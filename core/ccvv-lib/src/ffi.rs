@@ -374,7 +374,7 @@ where
         .parse()
         .map_err(|e| format!("toml parse error: {}", e))?;
 
-    if doc.get("settings").is_none() {
+    if !doc.get("settings").map(|it| it.is_table()).unwrap_or(false) {
         doc["settings"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
 

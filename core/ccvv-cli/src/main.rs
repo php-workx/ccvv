@@ -422,7 +422,9 @@ fn build_selective_stages(cli: &Cli) -> Vec<Box<dyn Transform>> {
 fn build_full_stages(resolved: &ccvv_lib::config::ResolvedConfig) -> Vec<Box<dyn Transform>> {
     let mut stages: Vec<Box<dyn Transform>> = Vec::new();
     if resolved.settings.normalize_unicode {
-        stages.push(Box::new(NormalizeTransform::new()));
+        stages.push(Box::new(
+            NormalizeTransform::new().with_em_dash_replacement(&resolved.em_dash_replacement),
+        ));
     }
     if resolved.settings.whitespace_cleanup {
         stages.push(Box::new(WhitespaceTransform::new()));
@@ -435,7 +437,10 @@ fn build_full_stages(resolved: &ccvv_lib::config::ResolvedConfig) -> Vec<Box<dyn
     }
     if resolved.settings.url_cleaning {
         stages.push(Box::new(
-            UrlTransform::new().with_strip_scheme(resolved.settings.url_strip_scheme),
+            UrlTransform::new()
+                .with_strip_scheme(resolved.settings.url_strip_scheme)
+                .with_domain_overrides(resolved.url_domain_overrides.clone())
+                .with_extra_deny_params(resolved.url_global_deny.clone()),
         ));
     }
     if resolved.settings.auto_wrapper {

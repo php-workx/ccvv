@@ -88,6 +88,7 @@ impl Pipeline {
             if original_len > 0 {
                 let ratio = text.len() as f64 / original_len as f64;
                 if ratio > self.max_output_ratio {
+                    ctx.rules_fired.clear();
                     return (input.to_string(), ctx);
                 }
             }
@@ -126,6 +127,7 @@ impl Pipeline {
                 if original_len > 0 {
                     let ratio = text.len() as f64 / original_len as f64;
                     if ratio > self.max_output_ratio {
+                        ctx.rules_fired.clear();
                         return (input.to_string(), ctx);
                     }
                 }

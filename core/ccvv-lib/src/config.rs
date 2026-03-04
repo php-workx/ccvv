@@ -358,7 +358,15 @@ pub fn resolve_config(
             }
             Some(*ms)
         }
-        DoubleTapSetting::Adaptive(_) => None,
+        DoubleTapSetting::Adaptive(s) => {
+            if s != "auto" {
+                return Err(CcvvError::Config(format!(
+                    "double_tap_window_ms: invalid value \"{}\", expected a number or \"auto\"",
+                    s
+                )));
+            }
+            None
+        }
     };
 
     // Resolve em-dash replacement

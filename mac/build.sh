@@ -40,7 +40,9 @@ if [[ "$SKIP_RUST" -eq 0 ]]; then
         | python3 -c "import sys,json; print(json.load(sys.stdin)['target_directory'])" 2>/dev/null \
         || echo "$CORE_DIR/target")
     HEADER_DIR=$(find "$RUST_OUT_DIR/release/build" -name "ccvv-bridge.h" -print -quit 2>/dev/null)
-    HEADER_DIR=$(dirname "$HEADER_DIR" 2>/dev/null || true)
+    if [[ -n "$HEADER_DIR" ]]; then
+        HEADER_DIR=$(dirname "$HEADER_DIR")
+    fi
     LIB_PATH="$RUST_OUT_DIR/release/libccvv_lib.a"
 
     if [[ ! -f "$LIB_PATH" ]]; then
