@@ -37,19 +37,17 @@ install-mac:
 
 # Static code security scan (Semgrep).
 semgrep:
-  if ! command -v semgrep >/dev/null 2>&1; then
-    echo "semgrep not found. Install: brew install semgrep"
-    exit 1
-  fi
+  #!/usr/bin/env bash
+  set -euo pipefail
+  command -v semgrep >/dev/null 2>&1 || { echo "semgrep not found. Install: brew install semgrep"; exit 1; }
   semgrep scan --config auto --error core mac
 
 # Shell script linting.
 shellcheck:
-  if ! command -v shellcheck >/dev/null 2>&1; then
-    echo "shellcheck not found. Install: brew install shellcheck"
-    exit 1
-  fi
-  scripts="$(rg --files -g '*.sh' || true)"
+  #!/usr/bin/env bash
+  set -euo pipefail
+  command -v shellcheck >/dev/null 2>&1 || { echo "shellcheck not found. Install: brew install shellcheck"; exit 1; }
+  scripts="$(rg --files -g '*.sh' || find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*')"
   if [ -z "$scripts" ]; then
     echo "No shell scripts found."
     exit 0
@@ -58,30 +56,29 @@ shellcheck:
 
 # Dependency vulnerability audit.
 audit:
-  if ! cargo audit --version >/dev/null 2>&1; then
-    echo "cargo-audit not found. Install: cargo install cargo-audit"
-    exit 1
-  fi
+  #!/usr/bin/env bash
+  set -euo pipefail
+  command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
   cd core && cargo audit
 
 # Generate LCOV coverage report.
 coverage:
-  if ! cargo llvm-cov --version >/dev/null 2>&1; then
-    echo "cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"
-    exit 1
-  fi
+  #!/usr/bin/env bash
+  set -euo pipefail
+  command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
   cd core && cargo llvm-cov --workspace --lcov --output-path target/coverage/lcov.info
 
 # Generate HTML coverage report.
 coverage-html:
-  if ! cargo llvm-cov --version >/dev/null 2>&1; then
-    echo "cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"
-    exit 1
-  fi
+  #!/usr/bin/env bash
+  set -euo pipefail
+  command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
   cd core && cargo llvm-cov --workspace --html --output-dir target/coverage/html
 
 # Run SonarQube/SonarCloud scan.
 sonar:
+  #!/usr/bin/env bash
+  set -euo pipefail
   if [ -z "${SONAR_HOST_URL:-}" ] || [ -z "${SONAR_TOKEN:-}" ] || [ -z "${SONAR_PROJECT_KEY:-}" ]; then
     echo "Set SONAR_HOST_URL, SONAR_TOKEN, SONAR_PROJECT_KEY"
     exit 1
