@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
@@ -46,7 +46,9 @@ jobs:
           echo "Updated all version strings to $VERSION"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: stable
 
       - name: Import code signing certificate
         env:
@@ -109,10 +111,15 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          gh release create "$GITHUB_REF_NAME" \
-            "ccvv-$VERSION.zip" \
-            --title "ccvv $VERSION" \
-            --generate-notes
+          if gh release view "$GITHUB_REF_NAME" &>/dev/null; then
+            echo "Release $GITHUB_REF_NAME already exists, uploading asset"
+            gh release upload "$GITHUB_REF_NAME" "ccvv-$VERSION.zip" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "ccvv-$VERSION.zip" \
+              --title "ccvv $VERSION" \
+              --generate-notes
+          fi
 
       - name: Verify release asset is downloadable
         env:
@@ -158,6 +165,13 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
+          TAG_SHA=$(git rev-parse "$GITHUB_REF_NAME")
+
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "Tag $GITHUB_REF_NAME ($TAG_SHA) is not on main — skipping version bump"
+            exit 0
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

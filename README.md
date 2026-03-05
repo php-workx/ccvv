@@ -2,7 +2,7 @@
 
 **Double the tap, half the mess.**
 
-[![macOS](https://img.shields.io/badge/macOS-Ventura+-black?logo=apple)](#)
+[![macOS](https://img.shields.io/badge/macOS-Ventura+-black?logo=apple)](https://github.com/php-workx/ccvv/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 
 You copy text from a terminal, a PDF, or an AI agent. You paste it. It's a disaster of ANSI escape codes, hard line breaks, phantom spaces, and tracking URLs.
