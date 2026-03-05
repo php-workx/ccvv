@@ -33,7 +33,7 @@ if [[ "$SKIP_RUST" -eq 0 ]]; then
         echo "Error: cargo not found. Install Rust from https://rustup.rs"
         exit 1
     fi
-    (cd "$CORE_DIR" && cargo build --package ccvv-lib --release)
+    (cd "$CORE_DIR" && cargo build --package ccvv-lib --package ccvv-cli --release)
 
     # Find the generated header
     RUST_OUT_DIR=$(cd "$CORE_DIR" && cargo metadata --format-version 1 2>/dev/null \
@@ -92,6 +92,13 @@ else
     echo "Warning: icon asset missing at $SCRIPT_DIR/assets/ccvv.icns"
 fi
 
+# Copy CLI binary into bundle if it was built
+CLI_PATH="$RUST_OUT_DIR/release/ccvv"
+if [[ -f "$CLI_PATH" ]]; then
+    cp "$CLI_PATH" "$APP_BUNDLE/Contents/MacOS/ccvv-cli"
+    echo "  CLI binary: $APP_BUNDLE/Contents/MacOS/ccvv-cli"
+fi
+
 echo "Signing..."
 # Prefer Developer ID (distributable), fall back to Apple Development, then ad-hoc
 SIGN_ID=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
@@ -100,6 +107,11 @@ if [[ -z "$SIGN_ID" ]]; then
 fi
 
 if [[ -n "$SIGN_ID" ]]; then
+    # Sign the CLI binary separately (must be signed before the bundle)
+    if [[ -f "$APP_BUNDLE/Contents/MacOS/ccvv-cli" ]]; then
+        codesign --force --options runtime \
+            --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/ccvv-cli"
+    fi
     codesign --force --options runtime \
         --entitlements ccvv.entitlements \
         --sign "$SIGN_ID" "$APP_BUNDLE"

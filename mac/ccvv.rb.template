@@ -10,4 +10,5 @@ cask "ccvv" do
   depends_on macos: ">= :ventura"
 
   app "ccvv.app"
+  binary "ccvv.app/Contents/MacOS/ccvv-cli", target: "ccvv"
 end
