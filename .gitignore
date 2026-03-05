@@ -1,6 +1,5 @@
-build
+/build
 mac/build
-Casks
 
 # Rust build artifacts
 core/target/

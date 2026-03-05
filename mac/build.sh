@@ -2,13 +2,13 @@
 set -e
 
 APP_NAME="ccvv"
-BUILD_DIR="build"
+BUILD_DIR="$(cd "$(dirname "$0")/.." && pwd)/build"
 TEAM_ID="4JRN737CHR"
 # shellcheck disable=SC2034  # kept for reference; used by codesign/notarize workflows
 BUNDLE_ID="com.ccvv.app"
 NOTARIZE=0
 SKIP_RUST=0
-DEPLOYMENT_TARGET="${CCVV_MACOS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-26.0}}"
+DEPLOYMENT_TARGET="${CCVV_MACOS_DEPLOYMENT_TARGET:-${MACOSX_DEPLOYMENT_TARGET:-13.0}}"
 SWIFT_ARCH="$(uname -m)"
 SWIFT_TARGET="${SWIFT_ARCH}-apple-macos${DEPLOYMENT_TARGET}"
 
@@ -124,6 +124,7 @@ if [[ "$NOTARIZE" -eq 1 && "$SIGN_ID" == *"Developer ID"* ]]; then
         echo "Notarization failed. To set up credentials:"
         echo "  xcrun notarytool store-credentials notarytool --apple-id YOUR_APPLE_ID --team-id $TEAM_ID"
         rm -f "$ZIP_PATH"
+        exit 1
     fi
 fi
 
