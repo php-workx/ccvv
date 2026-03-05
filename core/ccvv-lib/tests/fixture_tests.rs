@@ -118,6 +118,18 @@ fixture_test!(
     "cleaned_17_list_with_continuations.txt"
 );
 
+fixture_test!(
+    fixture_18_instructions_with_shell_commands,
+    "raw_18_instructions_with_shell_commands.txt",
+    "cleaned_18_instructions_with_shell_commands.txt"
+);
+
+fixture_test!(
+    fixture_19_multiline_shell_command,
+    "raw_19_multiline_shell_command.txt",
+    "cleaned_19_multiline_shell_command.txt"
+);
+
 // ===== Idempotency: every fixture must be stable under double-application =====
 
 macro_rules! fixture_idempotency_test {
@@ -178,4 +190,12 @@ fixture_idempotency_test!(
 fixture_idempotency_test!(
     idempotent_17_list_with_continuations,
     "raw_17_list_with_continuations.txt"
+);
+fixture_idempotency_test!(
+    idempotent_18_instructions_with_shell_commands,
+    "raw_18_instructions_with_shell_commands.txt"
+);
+fixture_idempotency_test!(
+    idempotent_19_multiline_shell_command,
+    "raw_19_multiline_shell_command.txt"
 );

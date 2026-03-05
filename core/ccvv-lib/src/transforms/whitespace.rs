@@ -273,8 +273,45 @@ pub fn normalize_bullet_marker(line: &str) -> String {
     BULLET_RE.replace(line, "- ").to_string()
 }
 
+/// Join shell continuation lines (lines ending with `\`) into single lines.
+fn join_shell_continuations(lines: &[ParagraphLine]) -> Vec<ParagraphLine> {
+    let mut result: Vec<ParagraphLine> = Vec::new();
+    let mut acc: Option<ParagraphLine> = None;
+
+    for entry in lines {
+        if let Some(ref mut a) = acc {
+            // Continuing a backslash-joined sequence
+            let trimmed = entry.text.trim_start();
+            if trimmed.ends_with('\\') {
+                a.text.push(' ');
+                a.text.push_str(trimmed[..trimmed.len() - 1].trim_end());
+            } else {
+                a.text.push(' ');
+                a.text.push_str(trimmed);
+                result.push(a.clone());
+                acc = None;
+            }
+        } else if entry.text.ends_with('\\') {
+            // Start a new backslash continuation
+            acc = Some(ParagraphLine {
+                text: entry.text[..entry.text.len() - 1].trim_end().to_string(),
+                indent: entry.indent,
+            });
+        } else {
+            result.push(entry.clone());
+        }
+    }
+
+    if let Some(a) = acc {
+        result.push(a);
+    }
+    result
+}
+
 /// Compact a paragraph by joining continuation lines.
 pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
+    let joined = join_shell_continuations(lines);
+    let lines = &joined;
     let mut output_lines: Vec<String> = Vec::new();
     let mut buffer = String::new();
     let base_indent = lines.iter().map(|l| l.indent).min().unwrap_or(0);
@@ -291,6 +328,13 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
             last_list_item_rel_indent = relative_indent;
             let indent_str = " ".repeat(relative_indent);
             output_lines.push(format!("{}{}", indent_str, entry.text));
+        } else if is_shell_command(&entry.text) {
+            // Shell commands stay on their own line, like list items.
+            if !buffer.is_empty() {
+                output_lines.push(buffer.clone());
+                buffer.clear();
+            }
+            output_lines.push(entry.text.clone());
         } else if !output_lines.is_empty()
             && is_list_item_with_optional_indent(output_lines.last().unwrap())
             && buffer.is_empty()
@@ -322,6 +366,68 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
 fn is_list_item_with_optional_indent(line: &str) -> bool {
     let trimmed = line.trim_start();
     is_list_item(trimmed)
+}
+
+/// Known shell commands for standalone-line detection.
+const SHELL_COMMANDS: &[&str] = &[
+    "rm", "cp", "mv", "mkdir", "chmod", "ln", "touch", "cd", "ls", "open", "brew", "npm",
+    "yarn", "pip", "pip3", "cargo", "go", "make", "git", "docker", "curl", "wget", "ssh", "scp",
+    "tar", "sudo", "python", "python3", "node", "cat", "echo", "export", "source", "xcrun",
+    "aws", "gcloud", "az", "kubectl", "terraform", "helm",
+];
+
+/// Check if a line looks like a standalone shell command.
+///
+/// Recognises both plain commands (`rm -rf /tmp/foo`) and backtick-wrapped
+/// commands (`` `rm -rf /tmp/foo` ``) so that idempotent re-processing keeps
+/// them on separate lines.
+pub fn is_shell_command(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Handle backtick-wrapped commands for idempotency
+    let inner = if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() > 2 {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+
+    let first = match inner.split_whitespace().next() {
+        Some(w) => w,
+        None => return false,
+    };
+
+    // Handle sudo prefix
+    let cmd = if first == "sudo" {
+        inner.split_whitespace().nth(1).unwrap_or("")
+    } else {
+        first
+    };
+
+    // Lines starting with ./ (running a local script)
+    if cmd.starts_with("./") {
+        return true;
+    }
+
+    if !SHELL_COMMANDS.contains(&cmd) {
+        return false;
+    }
+
+    // Require at least one flag or path argument to distinguish from prose
+    // like "open the file" or "make the changes".
+    let word_count = inner.split_whitespace().count();
+    if word_count <= 1 {
+        return false;
+    }
+
+    inner.split_whitespace().skip(1).any(|w| {
+        (w.starts_with('-') && w.len() > 1)
+            || w.contains('/')
+            || w.starts_with('~')
+            || w.starts_with('$')
+    })
 }
 
 /// Check if a line is a code fence marker.
