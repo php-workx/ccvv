@@ -1,0 +1,14 @@
+fix: address PR review findings and CI failures
+
+  - Fix clippy: .get(0) → .first() in table_extract tests
+  - Fix shellcheck: SC2034 (unused BUNDLE_ID), SC2038 (find|xargs),
+    SC2015 (&&/|| pattern) in mac/build.sh
+  - Fix semgrep: add nosemgrep comments for test token false positives
+  - Fix coverage: mkdir -p target/coverage before lcov output
+  - Fix justfile: use find instead of rg (not on CI), safe array quoting
+  - Add push trigger to workflow for branch CI
+  - Add workspace MSRV 1.82, use % instead of is_multiple_of
+  - Fix FFI: recover from poisoned mutex instead of panic across FFI
+  - Simplify: strip_www_from_url, looks_like_path, collapse_padding
+  - Include flatten_json in selective pipeline detection
+  - Run cargo fmt on all files

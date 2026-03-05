@@ -1,0 +1,1 @@
+ccvv `v1.2.0` built, signed, and installed to `/Applications/`. Version updated in all three places (`main.swift`, `ccvv.rb`, `CLAUDE.md`).

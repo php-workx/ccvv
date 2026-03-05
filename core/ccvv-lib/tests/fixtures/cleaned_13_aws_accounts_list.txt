@@ -1,0 +1,32 @@
+AWS Accounts (8 total):
+  - `AcmeDev` (111222333444) -- staging environment for Acme
+  - `AcmeProd` (222333444555) -- production for Acme
+  - `AcmeTest` (333444555666) -- test environment
+  - `GlobexDev` (444555666777) -- staging for Globex
+  - `GlobexProd` (555666777888) -- production for Globex
+  - `GlobexSecurity` (666777888999) -- security hub, `GuardDuty` org admin
+  - Management (777888999000) -- AWS Organizations management account
+
+GCP Projects:
+- acme-staging and acme-production -- the only two with active GCP workloads
+
+VPC Layout:
+- `VPCs` spread across 16+ AWS regions per account (all standard regions)
+- Primary workload regions: eu-central-1 and us-east-1
+- `GlobexProd` also uses eu-west-1 for services
+- VPC Flow Logs enforced on all `VPCs` -- some managed externally (CDK/Terraform), the rest by this compliance stack
+- GCP VPC flow logs configured via `VpcFlowLogsConfig` resources with retention sinks
+
+Cloudflare Zero Trust (`ZTNA`):
+- Tunnel connectors running as ECS Fargate tasks inside private subnets
+- `AcmeDev`: 2 active connectors (acme-staging-eu in eu-central-1, acme-staging-us in us-east-1) -- `desiredCount`: 1 each
+- `AcmeProd`: 2 active connectors (acme-production-eu, acme-production-us) -- `desiredCount`: 1 each
+- `GlobexProd`: 2 connectors defined but disabled (`desiredCount`: 0) -- globex-prod-euc1-fargate and globex-prod-euw1-services, with custom tunnel names
+- Each connector has a dedicated security group
+- Not enabled on `GlobexDev`, `AcmeTest`, `GlobexSecurity`, or Management
+
+Security Monitoring:
+- `GuardDuty`: Org-wide, administered from `GlobexSecurity` account, findings exported to S3 for long-term archival
+- SCC (GCP): `NotificationConfigs` on both GCP projects, pushing HIGH/CRITICAL findings → Pub/Sub → Cloud Function → Slack (`#ops_alerts_security`)
+- `CloudWatch` log retention: Tiered enforcement (365d security, 90d default, 14d ephemeral) across all ~4000 log groups in 8 accounts
+- Slack notifications: CW alarms fan-in via SQS → Lambda → Slack, per-account alarm channels plus a shared security channel (`C0EXAMPLE1A`)

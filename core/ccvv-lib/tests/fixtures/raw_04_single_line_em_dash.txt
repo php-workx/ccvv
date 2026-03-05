@@ -1,0 +1,1 @@
+Still applies — you're capped at max_containers=3. Worth

@@ -1,0 +1,6 @@
+I see the issue. Look at line 1242 and line 1321:
+
+- Line 1242 (precomputed path): `candidate.cleanedText` == `candidate.rawText` -- compares cleaned against `rawText`
+- Line 1321 (`performClean` path): cleaned == `originalText` -- compares cleaned against `originalText` which is pb.string(forType: .string) (line 1295)
+
+But the precomputed path also uses `rawText`. Let me check what `rawText` is set to during precompute:
