@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      CCVV_MACOS_DEPLOYMENT_TARGET: '13.0'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Update version strings
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # mac/main.swift
+          sed -i '' "s/let appVersion = \".*\"/let appVersion = \"$VERSION\"/" mac/main.swift
+
+          # mac/Info.plist — CFBundleVersion and CFBundleShortVersionString
+          # Both values appear as <string>X.Y.Z</string> after their respective keys
+          sed -i '' "/<key>CFBundleVersion<\/key>/{ n; s/<string>.*<\/string>/<string>$VERSION<\/string>/; }" mac/Info.plist
+          sed -i '' "/<key>CFBundleShortVersionString<\/key>/{ n; s/<string>.*<\/string>/<string>$VERSION<\/string>/; }" mac/Info.plist
+
+          # core/ccvv-lib/Cargo.toml and core/ccvv-cli/Cargo.toml
+          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" core/ccvv-lib/Cargo.toml
+          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" core/ccvv-cli/Cargo.toml
+
+          echo "Updated all version strings to $VERSION"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Import code signing certificate
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          rm -f "$CERT_PATH"
+
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool store-credentials "notarytool" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID"
+
+      - name: Build, sign, and notarize
+        working-directory: mac
+        run: ./build.sh --notarize
+
+      - name: Create ZIP artifact
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ditto -c -k --sequesterRsrc --keepParent mac/build/ccvv.app "ccvv-$VERSION.zip"
+
+      - name: Compute SHA256
+        id: sha
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA=$(shasum -a 256 "ccvv-$VERSION.zip" | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "SHA256: $SHA"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "$GITHUB_REF_NAME" \
+            "ccvv-$VERSION.zip" \
+            --title "ccvv $VERSION" \
+            --generate-notes
+
+      - name: Update Homebrew tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA="${{ steps.sha.outputs.sha256 }}"
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/php-workx/homebrew-ccvv.git" \
+            "$RUNNER_TEMP/homebrew-ccvv"
+
+          mkdir -p "$RUNNER_TEMP/homebrew-ccvv/Casks"
+
+          cat > "$RUNNER_TEMP/homebrew-ccvv/Casks/ccvv.rb" <<CASK
+cask "ccvv" do
+  version "$VERSION"
+  sha256 "$SHA"
+
+  url "https://github.com/php-workx/ccvv/releases/download/v#{version}/ccvv-#{version}.zip"
+  name "ccvv"
+  desc "Clean up clipboard text while preserving markdown structure"
+  homepage "https://github.com/php-workx/ccvv"
+
+  depends_on macos: ">= :ventura"
+
+  app "ccvv.app"
+end
+CASK
+
+          cd "$RUNNER_TEMP/homebrew-ccvv"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/ccvv.rb
+          git commit -m "Update ccvv to $VERSION"
+          git push
+
+      - name: Commit version bump back to main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout main
+          git pull origin main
+
+          # Re-apply version changes to main
+          sed -i '' "s/let appVersion = \".*\"/let appVersion = \"$VERSION\"/" mac/main.swift
+          sed -i '' "/<key>CFBundleVersion<\/key>/{ n; s/<string>.*<\/string>/<string>$VERSION<\/string>/; }" mac/Info.plist
+          sed -i '' "/<key>CFBundleShortVersionString<\/key>/{ n; s/<string>.*<\/string>/<string>$VERSION<\/string>/; }" mac/Info.plist
+          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" core/ccvv-lib/Cargo.toml
+          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" core/ccvv-cli/Cargo.toml
+
+          git add mac/main.swift mac/Info.plist core/ccvv-lib/Cargo.toml core/ccvv-cli/Cargo.toml
+          git diff --cached --quiet && echo "No version changes needed" && exit 0
+
+          git commit -m "chore: bump version to $VERSION"
+          git push origin main

@@ -11,6 +11,23 @@ You copy text from a terminal, a PDF, or an AI agent. You paste it. It's a disas
 
 ---
 
+## Installation
+
+**Homebrew (recommended):**
+```bash
+brew tap php-workx/ccvv
+brew install --cask ccvv
+```
+
+**From source:**
+Requires macOS Ventura+, Xcode Command Line Tools, and Rust 1.82+.
+```bash
+cd mac && ./build.sh
+open build/ccvv.app
+```
+
+---
+
 ## How It Works
 
 It lives in your menu bar as `[cc]` and stays out of your way until you need it.
