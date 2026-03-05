@@ -148,4 +148,6 @@ Click the `[cc]` icon to:
 
 See `specs/` for the full [functional spec](specs/functional_v1.md) and [technical spec](specs/technical_v1.md).
 
-**License:** MIT
+## License
+
+MIT

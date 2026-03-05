@@ -144,8 +144,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/ccvv.rb
-          git commit -m "Update ccvv to $VERSION"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "Cask already up to date"
+          else
+            git commit -m "Update ccvv to $VERSION"
+            git push
+          fi
 
       - name: Commit version bump back to main
         env:
