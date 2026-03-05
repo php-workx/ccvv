@@ -7,7 +7,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use super::whitespace::is_code_fence_line;
+use super::whitespace::{is_code_fence_line, is_shell_command};
 use super::{RuleFired, Transform, TransformContext};
 
 static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\S+").unwrap());
@@ -68,6 +68,16 @@ impl Transform for AutowrapTransform {
                 output.push(line.to_string());
                 continue;
             }
+            // Wrap entire shell command lines in backticks rather than
+            // wrapping individual tokens (paths, flags) separately.
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('`') && is_shell_command(trimmed) {
+                let wrapped = format!("`{}`", trimmed);
+                chars_changed += 2;
+                output.push(wrapped);
+                continue;
+            }
+
             let wrapped = wrap_code_like_tokens_outside_backticks(line);
             if wrapped != line {
                 chars_changed += wrapped.len().saturating_sub(line.len());
