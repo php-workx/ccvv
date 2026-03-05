@@ -22,19 +22,20 @@ jobs:
       - name: Parse version from tag
         id: version
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION"
 
       - name: Update version strings
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
 
           # mac/main.swift
           sed -i '' "s/let appVersion = \".*\"/let appVersion = \"$VERSION\"/" mac/main.swift
 
           # mac/Info.plist — CFBundleVersion and CFBundleShortVersionString
-          # Both values appear as <string>X.Y.Z</string> after their respective keys
           sed -i '' "/<key>CFBundleVersion<\/key>/{ n; s/<string>.*<\/string>/<string>$VERSION<\/string>/; }" mac/Info.plist
           sed -i '' "/<key>CFBundleShortVersionString<\/key>/{ n; s/<string>.*<\/string>/<string>$VERSION<\/string>/; }" mac/Info.plist
 
@@ -52,6 +53,7 @@ jobs:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
+          set -euo pipefail
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
@@ -75,6 +77,7 @@ jobs:
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
           xcrun notarytool store-credentials "notarytool" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
@@ -82,16 +85,19 @@ jobs:
 
       - name: Build, sign, and notarize
         working-directory: mac
+        timeout-minutes: 30
         run: ./build.sh --notarize
 
       - name: Create ZIP artifact
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          ditto -c -k --sequesterRsrc --keepParent mac/build/ccvv.app "ccvv-$VERSION.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/ccvv.app "ccvv-$VERSION.zip"
 
       - name: Compute SHA256
         id: sha
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           SHA=$(shasum -a 256 "ccvv-$VERSION.zip" | awk '{print $1}')
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
@@ -101,16 +107,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           gh release create "$GITHUB_REF_NAME" \
             "ccvv-$VERSION.zip" \
             --title "ccvv $VERSION" \
             --generate-notes
 
+      - name: Verify release asset is downloadable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          ASSET_URL="https://github.com/php-workx/ccvv/releases/download/v${VERSION}/ccvv-${VERSION}.zip"
+          curl --head --fail --silent --show-error --location "$ASSET_URL" > /dev/null
+          echo "Asset verified: $ASSET_URL"
+
       - name: Update Homebrew tap
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           SHA="${{ steps.sha.outputs.sha256 }}"
 
@@ -119,21 +137,8 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/homebrew-ccvv/Casks"
 
-          cat > "$RUNNER_TEMP/homebrew-ccvv/Casks/ccvv.rb" <<CASK
-cask "ccvv" do
-  version "$VERSION"
-  sha256 "$SHA"
-
-  url "https://github.com/php-workx/ccvv/releases/download/v#{version}/ccvv-#{version}.zip"
-  name "ccvv"
-  desc "Clean up clipboard text while preserving markdown structure"
-  homepage "https://github.com/php-workx/ccvv"
-
-  depends_on macos: ">= :ventura"
-
-  app "ccvv.app"
-end
-CASK
+          sed -e "s/@@VERSION@@/$VERSION/" -e "s/@@SHA256@@/$SHA/" \
+            mac/ccvv.rb.template > "$RUNNER_TEMP/homebrew-ccvv/Casks/ccvv.rb"
 
           cd "$RUNNER_TEMP/homebrew-ccvv"
           git config user.name "github-actions[bot]"
@@ -146,6 +151,7 @@ CASK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
 
           git config user.name "github-actions[bot]"
@@ -162,7 +168,10 @@ CASK
           sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" core/ccvv-cli/Cargo.toml
 
           git add mac/main.swift mac/Info.plist core/ccvv-lib/Cargo.toml core/ccvv-cli/Cargo.toml
-          git diff --cached --quiet && echo "No version changes needed" && exit 0
 
-          git commit -m "chore: bump version to $VERSION"
-          git push origin main
+          if git diff --cached --quiet; then
+            echo "No version changes needed"
+          else
+            git commit -m "chore: bump version to $VERSION"
+            git push origin main
+          fi

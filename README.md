@@ -22,7 +22,7 @@ brew install --cask ccvv
 **From source:**
 Requires macOS Ventura+, Xcode Command Line Tools, and Rust 1.82+.
 ```bash
-cd mac && ./build.sh
+mac/build.sh
 open build/ccvv.app
 ```
 

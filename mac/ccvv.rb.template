@@ -1,0 +1,13 @@
+cask "ccvv" do
+  version "@@VERSION@@"
+  sha256 "@@SHA256@@"
+
+  url "https://github.com/php-workx/ccvv/releases/download/v#{version}/ccvv-#{version}.zip"
+  name "ccvv"
+  desc "Clean up clipboard text while preserving markdown structure"
+  homepage "https://github.com/php-workx/ccvv"
+
+  depends_on macos: ">= :ventura"
+
+  app "ccvv.app"
+end
