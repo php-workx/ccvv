@@ -1108,16 +1108,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             lastCmdCAt = .distantPast
             CcvvCore.shared.recordTimingSample(intervalMs: UInt32(elapsed * 1000))
             log("double Cmd+C detected (interval=\(String(format: "%.2f", elapsed))s)")
-            if applyPendingCandidateIfAvailable() {
-                return
+
+            // Take the precomputed candidate (if any) without writing yet.
+            // We must wait for the system's clipboard write from this second
+            // Cmd+C before writing cleaned text — the event tap is .listenOnly
+            // and cannot swallow the key event, so the system copy will overwrite
+            // anything we write now.
+            let candidate = pendingCleanupCandidate
+            if candidate != nil {
+                clearPendingCleanupCandidate(reason: "consumed")
             }
+
             let countBefore = NSPasteboard.general.changeCount
             waitForClipboardUpdate(previousCount: countBefore, timeout: 0.5) { [weak self] updated in
                 guard let self = self else { return }
-                if !updated {
-                    log("double Cmd+C: no new clipboard change detected, using immediate fallback clean")
+                if let candidate = candidate {
+                    self.applyPrecomputedCandidate(candidate)
+                } else {
+                    if !updated {
+                        log("double Cmd+C: no new clipboard change detected, using immediate fallback clean")
+                    }
+                    self.performClean()
                 }
-                self.performClean()
             }
         } else {
             // Miss indicator: near-miss detection
@@ -1209,6 +1221,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pendingCleanupCandidate = nil
         pendingCandidateExpiryTimer?.invalidate()
         pendingCandidateExpiryTimer = nil
+    }
+
+    /// Apply a precomputed candidate AFTER the system's clipboard write
+    /// from the second Cmd+C has completed.
+    func applyPrecomputedCandidate(_ candidate: PendingCleanupCandidate) {
+        if let table = candidate.tableExtraction, table.detected {
+            presentTablePicker(extraction: table)
+            return
+        }
+        if candidate.skippedSensitive {
+            showFeedback(success: false, message: "Skipped: looks like a secret")
+            return
+        }
+        if candidate.skippedOversize {
+            let sizeKB = candidate.rawText.utf8.count / 1024
+            showFeedback(success: false, message: "Skipped: content too large (\(sizeKB) KB)")
+            return
+        }
+        if candidate.cleanedText == candidate.rawText {
+            showFeedback(success: true, message: "No changes needed")
+            return
+        }
+
+        let pb = NSPasteboard.general
+        isWritingBack = true
+        pb.clearContents()
+        guard pb.setString(candidate.cleanedText, forType: .string) else {
+            pb.clearContents()
+            _ = pb.setString(candidate.rawText, forType: .string)
+            isWritingBack = false
+            showFeedback(success: false, message: nil)
+            return
+        }
+        writeBackChangeCount = pb.changeCount
+        isWritingBack = false
+
+        CcvvCore.shared.recordHistory(raw: candidate.rawText, cleaned: candidate.cleanedText, storeRaw: true)
+        transformCount += 1
+        NotificationCenter.default.post(name: Notification.Name("ccvv.cleanSuccess"), object: nil)
+
+        let message = candidate.summary.isEmpty ? "Cleaned" : candidate.summary
+        showFeedback(success: true, message: message)
     }
 
     @discardableResult
