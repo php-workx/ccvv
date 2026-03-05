@@ -294,7 +294,7 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
         } else if !output_lines.is_empty()
             && is_list_item_with_optional_indent(output_lines.last().unwrap())
             && buffer.is_empty()
-            && relative_indent > last_list_item_rel_indent
+            && relative_indent >= last_list_item_rel_indent
         {
             // Continuation of a list item
             let last = output_lines.last_mut().unwrap();
@@ -486,5 +486,26 @@ mod tests {
         assert!(result.contains("Some text that spans multiple lines."));
         assert!(result.contains("- List item continuation"));
         assert!(result.contains("```\ncode block\n```"));
+    }
+
+    #[test]
+    fn test_terminal_wrapped_list_continuation() {
+        // Terminal-wrapped text: list item and continuation share the same indent
+        let input = "  - Line 1242 (precomputed path): candidate.cleanedText compares\n  cleaned against rawText";
+        let result = ccvv(input);
+        assert_eq!(
+            result,
+            "- Line 1242 (precomputed path): candidate.cleanedText compares cleaned against rawText"
+        );
+    }
+
+    #[test]
+    fn test_terminal_wrapped_multiple_continuations() {
+        let input = "  - Long list item that wraps\n  at the terminal boundary and\n  continues further";
+        let result = ccvv(input);
+        assert_eq!(
+            result,
+            "- Long list item that wraps at the terminal boundary and continues further"
+        );
     }
 }
