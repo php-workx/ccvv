@@ -34,11 +34,8 @@ impl Transform for StructuralTransform {
     fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
         // Skip structural detection for shell blocks and lists —
         // these should not be JSON-prettified, table-converted, or fence-wrapped
-        match ctx.content_type {
-            Some(ContentType::ShellBlock | ContentType::List) => {
-                return input.to_string();
-            }
-            _ => {}
+        if matches!(ctx.content_type, Some(ContentType::ShellBlock | ContentType::List)) {
+            return input.to_string();
         }
 
         let trimmed = input.trim();
@@ -248,6 +245,11 @@ impl StructuralTransform {
     }
 
     /// Attempt code fence wrapping.
+    ///
+    /// Uses a multi-signal scoring system to avoid false positives on
+    /// indented prose (common in CLI-copied text). Shebang is unambiguous
+    /// and always triggers. Otherwise, requires ≥2 positive signals and
+    /// no strong prose signal.
     fn try_code_fence(&self, input: &str, ctx: &mut TransformContext) -> Option<String> {
         let lines: Vec<&str> = input.lines().collect();
         if lines.len() <= 3 {
@@ -264,22 +266,56 @@ impl StructuralTransform {
             return None;
         }
 
-        // Check shebang
+        // Shebang is unambiguous — always fence
         let has_shebang = input.starts_with("#!");
-
-        // Check indentation ratio
-        let indented_count = non_empty
-            .iter()
-            .filter(|l| l.starts_with(' ') || l.starts_with('\t'))
-            .count();
-        let indent_ratio = indented_count * 100 / non_empty.len();
 
         // Language keyword detection
         let lang = detect_language(input);
-        let has_lang_signal = lang.is_some();
 
-        if !has_shebang && indent_ratio < 40 && !has_lang_signal {
-            return None;
+        if has_shebang {
+            // Skip scoring, go straight to fencing
+        } else {
+            // Multi-signal scoring: need ≥2 positive signals, prose can veto
+            let mut score: i32 = 0;
+
+            // +1: high indentation ratio
+            let indented_count = non_empty
+                .iter()
+                .filter(|l| l.starts_with(' ') || l.starts_with('\t'))
+                .count();
+            if indented_count * 100 / non_empty.len() >= 40 {
+                score += 1;
+            }
+
+            // +1: language keywords detected
+            if lang.is_some() {
+                score += 1;
+            }
+
+            // +1: syntax density ({, }, ; on ≥15% of lines)
+            let syntax_lines = non_empty
+                .iter()
+                .filter(|l| l.contains('{') || l.contains('}') || l.contains(';'))
+                .count();
+            if syntax_lines * 100 / non_empty.len() >= 15 {
+                score += 1;
+            }
+
+            // -2: prose signal (≥30% of lines end with sentence punctuation)
+            let prose_lines = non_empty
+                .iter()
+                .filter(|l| {
+                    let t = l.trim();
+                    t.ends_with('.') || t.ends_with('?') || t.ends_with('!')
+                })
+                .count();
+            if prose_lines * 100 / non_empty.len() >= 30 {
+                score -= 2;
+            }
+
+            if score < 2 {
+                return None;
+            }
         }
 
         let lang_hint = lang.unwrap_or("");
@@ -544,5 +580,20 @@ mod tests {
         let transform = StructuralTransform::new();
         let result = transform.apply(input, &mut ctx);
         assert_eq!(result, input, "List should skip structural detection");
+    }
+
+    #[test]
+    fn test_indented_prose_not_fenced() {
+        // Indented prose from CLI with "from" and "import" as English words
+        // should NOT be fence-wrapped despite indentation + keyword matches
+        let input = "  1. EKS endpoint made private.\n  The change broke kubectl from outside the VPC.\n\n  2. Lambda moved into the VPC.\n  This required importing VPC properties from the cluster.\n\n  3. CDK auto-exported those properties.\n  The merge conflict sealed the trap.";
+        let mut ctx = TransformContext::default();
+        let transform = StructuralTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert!(
+            !result.starts_with("```"),
+            "Indented prose should not be fence-wrapped, got: {}",
+            &result[..result.len().min(80)]
+        );
     }
 }

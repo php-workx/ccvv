@@ -34,11 +34,12 @@ pub fn classify(text: &str) -> ContentType {
     let non_empty: Vec<&str> = lines.iter().filter(|l| !l.is_empty()).copied().collect();
 
     // ShellBlock detection: ALL non-empty lines are shell-like
-    if non_empty.len() >= 1 && non_empty.iter().all(|l| is_shell_line(l)) {
+    if !non_empty.is_empty() && non_empty.iter().all(|l| is_shell_line(l)) {
         return ContentType::ShellBlock;
     }
 
-    // Code detection: high indentation ratio or shebang
+    // Code detection: shebang is unambiguous; otherwise require indentation
+    // AND no strong prose signal (indented prose from CLIs is common)
     if lines.len() > 3 {
         if trimmed.starts_with("#!") {
             return ContentType::Code;
@@ -47,8 +48,17 @@ pub fn classify(text: &str) -> ContentType {
             .iter()
             .filter(|l| !l.is_empty() && l.starts_with([' ', '\t']))
             .count();
-        if non_empty.len() > 0 && indented * 100 / non_empty.len() >= 40 {
-            return ContentType::Code;
+        if !non_empty.is_empty() && indented * 100 / non_empty.len() >= 40 {
+            let prose_lines = non_empty
+                .iter()
+                .filter(|l| {
+                    let t = l.trim();
+                    t.ends_with('.') || t.ends_with('?') || t.ends_with('!')
+                })
+                .count();
+            if prose_lines * 100 / non_empty.len() < 30 {
+                return ContentType::Code;
+            }
         }
     }
 
@@ -75,8 +85,9 @@ fn is_shell_line(line: &str) -> bool {
     if trimmed.is_empty() {
         return true;
     }
-    // Shell comment or shebang
-    if trimmed.starts_with('#') {
+    // Shell comment (# followed by space) or shebang (#!).
+    // Excludes markdown headings (## ...) and horizontal rules (---).
+    if trimmed.starts_with("#!") || trimmed.starts_with("# ") {
         return true;
     }
     // Continuation line (ends with \)
@@ -87,8 +98,14 @@ fn is_shell_line(line: &str) -> bool {
     if trimmed.starts_with("$ ") {
         return true;
     }
-    // Indented continuation of a previous command (starts with -- or flags)
-    if trimmed.starts_with("--") || trimmed.starts_with('-') && trimmed.len() > 1 && trimmed.as_bytes()[1] != b' ' {
+    // Standalone flags (--flag or -f) as continuation of a prior command.
+    // Excludes markdown horizontal rules (---) and PEM markers (-----BEGIN).
+    if (trimmed.starts_with("--") && trimmed.len() > 2 && trimmed.as_bytes()[2].is_ascii_alphanumeric())
+        || (trimmed.starts_with('-')
+            && trimmed.len() > 1
+            && trimmed.as_bytes()[1] != b' '
+            && trimmed.as_bytes()[1] != b'-')
+    {
         return true;
     }
     is_shell_command(trimmed)
@@ -193,5 +210,30 @@ mod tests {
     fn test_classify_prose_with_one_list_item_not_list() {
         let input = "This is a paragraph about things.\n- Just one item";
         assert_ne!(classify(input), ContentType::List);
+    }
+
+    #[test]
+    fn test_classify_markdown_headings_not_shell_block() {
+        let input = "# Heading\n## Subheading\n### Third level";
+        assert_ne!(classify(input), ContentType::ShellBlock);
+    }
+
+    #[test]
+    fn test_classify_horizontal_rule_not_shell_block() {
+        let input = "Some text\n---\nMore text";
+        assert_ne!(classify(input), ContentType::ShellBlock);
+    }
+
+    #[test]
+    fn test_classify_pem_block_not_shell_block() {
+        let input = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
+        assert_ne!(classify(input), ContentType::ShellBlock);
+    }
+
+    #[test]
+    fn test_classify_indented_prose_not_code() {
+        // Indented text from CLI output — prose with sentence endings should NOT be Code
+        let input = "  1. EKS endpoint made private.\n  The one-line change broke kubectl.\n\n  2. Lambda moved into the VPC.\n  This required referencing VPC properties.";
+        assert_ne!(classify(input), ContentType::Code);
     }
 }

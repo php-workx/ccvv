@@ -495,13 +495,14 @@ fn ccvv_shell_block(input: &str) -> String {
         .collect();
 
     let joined = join_shell_continuations(&entries);
-    joined
-        .iter()
-        .map(|e| e.text.clone())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+    let mut result = String::new();
+    for (i, entry) in joined.iter().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        result.push_str(&entry.text);
+    }
+    result.trim().to_string()
 }
 
 /// Code passthrough mode: normalize line endings and strip recording dots.
