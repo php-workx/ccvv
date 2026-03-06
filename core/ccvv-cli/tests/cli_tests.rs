@@ -74,8 +74,16 @@ fn test_history_list_empty() {
 
 #[test]
 fn test_transform_sensitive_skip() {
+    // Use a temp config with sensitive_filter enabled (don't depend on user's ~/.ccvv/config.toml)
+    let dir = std::env::temp_dir().join("ccvv-test-sensitive");
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, "[settings]\nsensitive_filter = true\n").unwrap();
+
     let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
     ccvv_cmd()
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
         .write_stdin(pem)
         .assert()
         .success()

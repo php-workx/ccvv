@@ -4,7 +4,6 @@
 //! See §5.4 Stage 3 of the technical spec.
 
 use regex::Regex;
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use super::{ContentType, Transform, TransformContext};
@@ -20,6 +19,8 @@ static RECORDING_DOT_BULLET_RE: LazyLock<Regex> =
 pub struct ParagraphLine {
     pub text: String,
     pub indent: usize,
+    /// Character count of the original raw line (before cleaning/trimming).
+    pub raw_len: usize,
 }
 
 /// Whitespace cleanup transform (Stage 3).
@@ -61,7 +62,6 @@ pub fn ccvv(input: &str) -> String {
     let mut code_block: Vec<String> = Vec::new();
     let mut in_code_fence = false;
     let mut code_fence_indent = String::new();
-    let mut prev_raw_line_len: usize = 0;
 
     for raw_line in &raw_lines {
         let (line, excessive_padding) = collapse_padding(raw_line, in_code_fence);
@@ -78,7 +78,7 @@ pub fn ccvv(input: &str) -> String {
         }
 
         if is_code_fence_line(&line) {
-            flush_paragraph(&mut paragraph, &mut blocks);
+            flush_paragraph(&mut paragraph, &mut blocks, terminal_width);
             in_code_fence = true;
             code_fence_indent = leading_whitespace(&line);
             code_block = vec![canonical_fence_line(&line)];
@@ -86,18 +86,16 @@ pub fn ccvv(input: &str) -> String {
         }
 
         process_prose_line(
+            raw_line,
             &line,
             excessive_padding,
-            terminal_width,
-            prev_raw_line_len,
             &mut paragraph,
             &mut blocks,
+            terminal_width,
         );
-
-        prev_raw_line_len = raw_line.trim_end().chars().count();
     }
 
-    flush_paragraph(&mut paragraph, &mut blocks);
+    flush_paragraph(&mut paragraph, &mut blocks, terminal_width);
     if !code_block.is_empty() {
         flush_code_block(&mut code_block, &mut blocks);
     }
@@ -105,11 +103,15 @@ pub fn ccvv(input: &str) -> String {
     blocks.join("\n\n")
 }
 
-fn flush_paragraph(paragraph: &mut Vec<ParagraphLine>, blocks: &mut Vec<String>) {
+fn flush_paragraph(
+    paragraph: &mut Vec<ParagraphLine>,
+    blocks: &mut Vec<String>,
+    terminal_width: usize,
+) {
     if paragraph.is_empty() {
         return;
     }
-    let compacted = compact_paragraph(paragraph);
+    let compacted = compact_paragraph_with_width(paragraph, terminal_width);
     if !compacted.is_empty() {
         blocks.push(compacted);
     }
@@ -142,28 +144,26 @@ fn handle_inside_fence(
     }
 }
 
-/// Process a prose line: clean markers, check paragraph breaks, accumulate.
+/// Process a prose line: clean markers, accumulate into paragraph.
 fn process_prose_line(
+    raw_line: &str,
     line: &str,
     excessive_padding: bool,
-    terminal_width: usize,
-    prev_raw_line_len: usize,
     paragraph: &mut Vec<ParagraphLine>,
     blocks: &mut Vec<String>,
+    terminal_width: usize,
 ) {
     let (cleaned, indent) = clean_line_markers(line);
 
     if cleaned.is_empty() || excessive_padding {
-        flush_paragraph(paragraph, blocks);
+        flush_paragraph(paragraph, blocks, terminal_width);
     }
 
     if !cleaned.is_empty() {
-        if should_break_paragraph(paragraph, terminal_width, prev_raw_line_len, &cleaned) {
-            flush_paragraph(paragraph, blocks);
-        }
         paragraph.push(ParagraphLine {
             text: cleaned,
             indent,
+            raw_len: raw_line.trim_end().chars().count(),
         });
     }
 }
@@ -214,54 +214,50 @@ pub(crate) fn clean_line_markers(line: &str) -> (String, usize) {
     (cleaned, indent)
 }
 
-/// Check if the current line should trigger a paragraph flush.
-fn should_break_paragraph(
-    paragraph: &[ParagraphLine],
-    terminal_width: usize,
-    prev_raw_line_len: usize,
-    cleaned: &str,
-) -> bool {
-    if terminal_width == 0 || paragraph.is_empty() || prev_raw_line_len == 0 {
-        return false;
-    }
-    if prev_raw_line_len >= terminal_width * 85 / 100 {
-        return false;
-    }
-    if let Some(prev) = paragraph.last() {
-        if let Some(last_char) = prev.text.chars().last() {
-            return ".!?:".contains(last_char) && looks_like_paragraph_start(cleaned);
-        }
-    }
-    false
-}
-
 /// Detect terminal width from raw line lengths.
+///
+/// Word-wrapped text produces lines of varying lengths (e.g., 78, 80, 82, 84)
+/// because words break at different points. We bucket nearby lengths (±2 chars)
+/// and look for a cluster of ≥3 lines, returning the maximum length in that
+/// cluster as the terminal width.
 fn detect_terminal_width(raw_lines: &[&str]) -> usize {
-    let raw_lengths: Vec<usize> = raw_lines
+    let mut raw_lengths: Vec<usize> = raw_lines
         .iter()
-        .map(|l| l.chars().count())
+        .map(|l| l.trim_end().chars().count())
         .filter(|&len| len > 40)
         .collect();
 
-    let mut length_counts: HashMap<usize, usize> = HashMap::new();
-    for &len in &raw_lengths {
-        *length_counts.entry(len).or_insert(0) += 1;
+    if raw_lengths.len() < 3 {
+        return 0;
     }
 
-    length_counts
-        .iter()
-        .max_by_key(|(_, &count)| count)
-        .and_then(|(&len, &count)| if count >= 3 { Some(len) } else { None })
-        .unwrap_or(0)
+    raw_lengths.sort_unstable();
+
+    // Sliding window: find the largest cluster of lengths within a 4-char range
+    let mut best_count = 0;
+    let mut best_max = 0;
+
+    for (i, &len) in raw_lengths.iter().enumerate() {
+        // Count how many lengths fall within [len, len+4]
+        let count = raw_lengths[i..]
+            .iter()
+            .take_while(|&&l| l <= len + 4)
+            .count();
+        if count > best_count || (count == best_count && len > best_max) {
+            best_count = count;
+            // Use the maximum length in this cluster as the terminal width
+            best_max = raw_lengths[i..i + count].iter().copied().max().unwrap_or(len);
+        }
+    }
+
+    if best_count >= 3 {
+        best_max
+    } else {
+        0
+    }
 }
 
-/// Check if a line looks like the start of a new paragraph.
-fn looks_like_paragraph_start(line: &str) -> bool {
-    if is_list_item(line) {
-        return true;
-    }
-    line.chars().next().is_some_and(|c| c.is_uppercase())
-}
+
 
 /// Check if a line is a list item.
 pub fn is_list_item(line: &str) -> bool {
@@ -285,9 +281,9 @@ pub(crate) fn join_shell_continuations(lines: &[ParagraphLine]) -> Vec<Paragraph
         if let Some(ref mut a) = acc {
             // Continuing a backslash-joined sequence
             let trimmed = entry.text.trim_start();
-            if trimmed.ends_with('\\') {
+            if let Some(stripped) = trimmed.strip_suffix('\\') {
                 a.text.push(' ');
-                a.text.push_str(trimmed[..trimmed.len() - 1].trim_end());
+                a.text.push_str(stripped.trim_end());
             } else {
                 a.text.push(' ');
                 a.text.push_str(trimmed);
@@ -299,6 +295,7 @@ pub(crate) fn join_shell_continuations(lines: &[ParagraphLine]) -> Vec<Paragraph
             acc = Some(ParagraphLine {
                 text: entry.text[..entry.text.len() - 1].trim_end().to_string(),
                 indent: entry.indent,
+                raw_len: entry.raw_len,
             });
         } else {
             result.push(entry.clone());
@@ -311,12 +308,24 @@ pub(crate) fn join_shell_continuations(lines: &[ParagraphLine]) -> Vec<Paragraph
     result
 }
 
-/// Compact a paragraph by joining continuation lines.
+/// Compact a paragraph by joining continuation lines (without terminal width info).
 pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
+    compact_paragraph_with_width(lines, 0)
+}
+
+/// Compact a paragraph by joining continuation lines.
+///
+/// When `terminal_width > 0`, applies a reverse word-wrap heuristic in the
+/// regular-prose branch: if the previous raw line was short enough that the
+/// first word of the current line *could* have fit, the line break was
+/// intentional and should be preserved (as a `\n` within the block, not a
+/// `\n\n` block separator).
+pub fn compact_paragraph_with_width(lines: &[ParagraphLine], terminal_width: usize) -> String {
     let joined = join_shell_continuations(lines);
     let lines = &joined;
     let mut output_lines: Vec<String> = Vec::new();
     let mut buffer = String::new();
+    let mut last_buffer_raw_len: usize = 0;
     let base_indent = lines.iter().map(|l| l.indent).min().unwrap_or(0);
     let mut last_list_item_rel_indent: usize = 0;
 
@@ -329,6 +338,7 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
                 buffer.clear();
             }
             last_list_item_rel_indent = relative_indent;
+            last_buffer_raw_len = 0;
             let indent_str = " ".repeat(relative_indent);
             output_lines.push(format!("{}{}", indent_str, entry.text));
         } else if is_shell_command(&entry.text) {
@@ -337,6 +347,7 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
                 output_lines.push(buffer.clone());
                 buffer.clear();
             }
+            last_buffer_raw_len = 0;
             output_lines.push(entry.text.clone());
         } else if !output_lines.is_empty()
             && is_list_item_with_optional_indent(output_lines.last().unwrap())
@@ -348,13 +359,18 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
             last.push(' ');
             last.push_str(&entry.text);
         } else {
-            // Regular paragraph continuation
+            // Regular paragraph continuation — apply reverse word-wrap heuristic
+            if !buffer.is_empty() && should_keep_break(terminal_width, last_buffer_raw_len, &entry.text) {
+                output_lines.push(buffer.clone());
+                buffer.clear();
+            }
             if buffer.is_empty() {
                 buffer = entry.text.clone();
             } else {
                 buffer.push(' ');
                 buffer.push_str(&entry.text);
             }
+            last_buffer_raw_len = entry.raw_len;
         }
     }
 
@@ -363,6 +379,23 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
     }
 
     output_lines.join("\n")
+}
+
+/// Reverse word-wrap heuristic: if the previous raw line was short enough
+/// that the first word of the current line COULD have fit, the break was
+/// intentional. Returns `true` when the break should be preserved.
+fn should_keep_break(terminal_width: usize, prev_raw_len: usize, current_text: &str) -> bool {
+    if terminal_width == 0 || prev_raw_len == 0 {
+        return false;
+    }
+    let first_word_len = current_text
+        .split_whitespace()
+        .next()
+        .map(|w| w.chars().count())
+        .unwrap_or(0);
+    // Strict < (not <=): when the sum exactly equals terminal_width, the
+    // word barely fits — treat as soft wrap, not intentional break.
+    first_word_len > 0 && prev_raw_len + 1 + first_word_len < terminal_width
 }
 
 /// Check if a line is a list item, ignoring leading whitespace.
@@ -490,6 +523,7 @@ fn ccvv_shell_block(input: &str) -> String {
             ParagraphLine {
                 text: cleaned,
                 indent,
+                raw_len: line.trim_end().chars().count(),
             }
         })
         .collect();
