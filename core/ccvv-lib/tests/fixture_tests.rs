@@ -130,6 +130,18 @@ fixture_test!(
     "cleaned_19_multiline_shell_command.txt"
 );
 
+fixture_test!(
+    fixture_20_pure_shell_block,
+    "raw_20_pure_shell_block.txt",
+    "cleaned_20_pure_shell_block.txt"
+);
+
+fixture_test!(
+    fixture_21_pure_list,
+    "raw_21_pure_list.txt",
+    "cleaned_21_pure_list.txt"
+);
+
 // ===== Idempotency: every fixture must be stable under double-application =====
 
 macro_rules! fixture_idempotency_test {
@@ -198,4 +210,14 @@ fixture_idempotency_test!(
 fixture_idempotency_test!(
     idempotent_19_multiline_shell_command,
     "raw_19_multiline_shell_command.txt"
+);
+
+fixture_idempotency_test!(
+    idempotent_20_pure_shell_block,
+    "raw_20_pure_shell_block.txt"
+);
+
+fixture_idempotency_test!(
+    idempotent_21_pure_list,
+    "raw_21_pure_list.txt"
 );

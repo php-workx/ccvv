@@ -7,7 +7,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use super::{Transform, TransformContext};
+use super::{ContentType, Transform, TransformContext};
 
 static MULTI_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" {3,}").unwrap());
 static BULLET_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[•◦▪]\s+").unwrap());
@@ -42,8 +42,11 @@ impl Transform for WhitespaceTransform {
         "whitespace_cleanup"
     }
 
-    fn apply(&self, input: &str, _ctx: &mut TransformContext) -> String {
-        ccvv(input)
+    fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
+        match ctx.content_type {
+            Some(ContentType::ShellBlock) => ccvv_shell_block(input),
+            _ => ccvv(input),
+        }
     }
 }
 
@@ -192,7 +195,7 @@ fn collapse_padding(raw_line: &str, in_code_fence: bool) -> (String, bool) {
 }
 
 /// Strip recording dot, normalize bullets, compute indent.
-fn clean_line_markers(line: &str) -> (String, usize) {
+pub(crate) fn clean_line_markers(line: &str) -> (String, usize) {
     let mut indent = leading_indent_count(line);
     let mut cleaned = line.trim_start().to_string();
 
@@ -274,7 +277,7 @@ pub fn normalize_bullet_marker(line: &str) -> String {
 }
 
 /// Join shell continuation lines (lines ending with `\`) into single lines.
-fn join_shell_continuations(lines: &[ParagraphLine]) -> Vec<ParagraphLine> {
+pub(crate) fn join_shell_continuations(lines: &[ParagraphLine]) -> Vec<ParagraphLine> {
     let mut result: Vec<ParagraphLine> = Vec::new();
     let mut acc: Option<ParagraphLine> = None;
 
@@ -474,6 +477,58 @@ pub fn leading_indent_count(line: &str) -> usize {
     count
 }
 
+/// Shell block mode: normalize line endings, join continuations, strip markers.
+/// No paragraph compaction — each logical command stays on its own line.
+fn ccvv_shell_block(input: &str) -> String {
+    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+    let raw_lines: Vec<&str> = normalized.split('\n').collect();
+
+    let entries: Vec<ParagraphLine> = raw_lines
+        .iter()
+        .map(|line| {
+            let (cleaned, indent) = clean_line_markers(line);
+            ParagraphLine {
+                text: cleaned,
+                indent,
+            }
+        })
+        .collect();
+
+    let joined = join_shell_continuations(&entries);
+    joined
+        .iter()
+        .map(|e| e.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Code passthrough mode: normalize line endings and strip recording dots.
+/// Preserves all structure (indentation, blank lines, etc.).
+/// Not yet wired into the pipeline — reserved for when Code classification is
+/// tightened enough (e.g. via language detection) to avoid false positives.
+#[allow(dead_code)]
+fn ccvv_code_passthrough(input: &str) -> String {
+    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('\u{23FA}') {
+                let rest = trimmed
+                    .trim_start_matches('\u{23FA}')
+                    .trim_start();
+                let ws = &line[..line.len() - trimmed.len()];
+                format!("{}{}", ws, rest)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,5 +668,50 @@ mod tests {
             result,
             "- Long list item that wraps at the terminal boundary and continues further"
         );
+    }
+
+    #[test]
+    fn test_shell_block_no_compaction() {
+        let input = "rm -rf /tmp/foo\ncp -r ~/src /tmp/\nmkdir -p /tmp/out";
+        let result = ccvv_shell_block(input);
+        assert_eq!(result, "rm -rf /tmp/foo\ncp -r ~/src /tmp/\nmkdir -p /tmp/out");
+    }
+
+    #[test]
+    fn test_shell_block_joins_continuations() {
+        let input = "aws rds wait \\\n  --db-instance-identifier staging \\\n  --region eu-central-1";
+        let result = ccvv_shell_block(input);
+        assert_eq!(
+            result,
+            "aws rds wait --db-instance-identifier staging --region eu-central-1"
+        );
+    }
+
+    #[test]
+    fn test_shell_block_strips_recording_dot() {
+        let input = "\u{23FA} cargo build --release";
+        let result = ccvv_shell_block(input);
+        assert_eq!(result, "cargo build --release");
+    }
+
+    #[test]
+    fn test_code_passthrough_preserves_structure() {
+        let input = "fn main() {\n    println!(\"hello\");\n\n    let x = 1;\n}";
+        let result = ccvv_code_passthrough(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_code_passthrough_strips_recording_dot() {
+        let input = "\u{23FA} fn main() {\n    println!(\"hello\");\n}";
+        let result = ccvv_code_passthrough(input);
+        assert_eq!(result, "fn main() {\n    println!(\"hello\");\n}");
+    }
+
+    #[test]
+    fn test_code_passthrough_normalizes_crlf() {
+        let input = "line 1\r\nline 2\r\nline 3";
+        let result = ccvv_code_passthrough(input);
+        assert_eq!(result, "line 1\nline 2\nline 3");
     }
 }

@@ -6,6 +6,7 @@
 
 use crate::table_extract::extract_table;
 use crate::transforms::ContentType;
+use crate::transforms::whitespace::{is_list_item, is_shell_command};
 
 /// Classify the content type of the given text.
 pub fn classify(text: &str) -> ContentType {
@@ -30,6 +31,12 @@ pub fn classify(text: &str) -> ContentType {
     }
 
     let lines: Vec<&str> = trimmed.lines().collect();
+    let non_empty: Vec<&str> = lines.iter().filter(|l| !l.is_empty()).copied().collect();
+
+    // ShellBlock detection: ALL non-empty lines are shell-like
+    if non_empty.len() >= 1 && non_empty.iter().all(|l| is_shell_line(l)) {
+        return ContentType::ShellBlock;
+    }
 
     // Code detection: high indentation ratio or shebang
     if lines.len() > 3 {
@@ -40,9 +47,16 @@ pub fn classify(text: &str) -> ContentType {
             .iter()
             .filter(|l| !l.is_empty() && l.starts_with([' ', '\t']))
             .count();
-        let non_empty = lines.iter().filter(|l| !l.is_empty()).count();
-        if non_empty > 0 && indented * 100 / non_empty >= 40 {
+        if non_empty.len() > 0 && indented * 100 / non_empty.len() >= 40 {
             return ContentType::Code;
+        }
+    }
+
+    // List detection: ≥60% of non-empty lines are list items, ≥2 non-empty lines
+    if non_empty.len() >= 2 {
+        let list_count = non_empty.iter().filter(|l| is_list_item(l.trim())).count();
+        if list_count * 100 / non_empty.len() >= 60 {
+            return ContentType::List;
         }
     }
 
@@ -52,6 +66,32 @@ pub fn classify(text: &str) -> ContentType {
     } else {
         ContentType::Mixed
     }
+}
+
+/// Check if a single line is shell-like: a shell command, comment, shebang,
+/// continuation, or prompt.
+fn is_shell_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Shell comment or shebang
+    if trimmed.starts_with('#') {
+        return true;
+    }
+    // Continuation line (ends with \)
+    if trimmed.ends_with('\\') {
+        return true;
+    }
+    // Prompt prefix ($ command)
+    if trimmed.starts_with("$ ") {
+        return true;
+    }
+    // Indented continuation of a previous command (starts with -- or flags)
+    if trimmed.starts_with("--") || trimmed.starts_with('-') && trimmed.len() > 1 && trimmed.as_bytes()[1] != b' ' {
+        return true;
+    }
+    is_shell_command(trimmed)
 }
 
 #[cfg(test)]
@@ -98,5 +138,60 @@ mod tests {
     fn test_classify_code_shebang() {
         let code = "#!/bin/bash\necho hello\necho world\necho done";
         assert_eq!(classify(code), ContentType::Code);
+    }
+
+    #[test]
+    fn test_classify_shell_block_multiple_commands() {
+        let input = "rm -rf /tmp/foo\ncp -r ~/src /tmp/\nmkdir -p /tmp/out";
+        assert_eq!(classify(input), ContentType::ShellBlock);
+    }
+
+    #[test]
+    fn test_classify_shell_block_with_comments() {
+        let input = "# Install deps\nbrew install --cask jq\n# Build\ncargo build --release";
+        assert_eq!(classify(input), ContentType::ShellBlock);
+    }
+
+    #[test]
+    fn test_classify_shell_block_with_continuations() {
+        let input = "aws rds wait db-instance-available \\\n  --db-instance-identifier stagingdb \\\n  --region eu-central-1";
+        assert_eq!(classify(input), ContentType::ShellBlock);
+    }
+
+    #[test]
+    fn test_classify_shell_block_single_command() {
+        let input = "cargo build --release";
+        assert_eq!(classify(input), ContentType::ShellBlock);
+    }
+
+    #[test]
+    fn test_classify_mixed_prose_with_commands_not_shell_block() {
+        let input = "The running app has a lock. You need to:\n\n1. Quit ccvv\n2. Then reinstall:\n\nrm -rf /Applications/ccvv.app\ncp -r ~/build/ccvv.app /Applications/";
+        assert_ne!(classify(input), ContentType::ShellBlock);
+    }
+
+    #[test]
+    fn test_classify_list_pure() {
+        let input = "- Item one\n- Item two\n- Item three\n- Item four";
+        assert_eq!(classify(input), ContentType::List);
+    }
+
+    #[test]
+    fn test_classify_list_numbered() {
+        let input = "1. First step\n2. Second step\n3. Third step";
+        assert_eq!(classify(input), ContentType::List);
+    }
+
+    #[test]
+    fn test_classify_list_with_non_list_minority() {
+        // 3 out of 4 non-empty lines are list items = 75% >= 60%
+        let input = "Shopping list:\n- Apples\n- Bananas\n- Oranges";
+        assert_eq!(classify(input), ContentType::List);
+    }
+
+    #[test]
+    fn test_classify_prose_with_one_list_item_not_list() {
+        let input = "This is a paragraph about things.\n- Just one item";
+        assert_ne!(classify(input), ContentType::List);
     }
 }

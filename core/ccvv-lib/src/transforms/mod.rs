@@ -41,6 +41,8 @@ pub enum ContentType {
     Table,
     Json,
     Mixed,
+    ShellBlock,
+    List,
 }
 
 /// Every pipeline stage implements this trait.

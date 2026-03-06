@@ -32,6 +32,15 @@ impl Transform for StructuralTransform {
     }
 
     fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
+        // Skip structural detection for shell blocks and lists —
+        // these should not be JSON-prettified, table-converted, or fence-wrapped
+        match ctx.content_type {
+            Some(ContentType::ShellBlock | ContentType::List) => {
+                return input.to_string();
+            }
+            _ => {}
+        }
+
         let trimmed = input.trim();
 
         // Already fenced content — skip
@@ -511,5 +520,29 @@ mod tests {
             first, second,
             "Structural JSON transform must be idempotent"
         );
+    }
+
+    #[test]
+    fn test_skip_for_shell_block() {
+        let input = "    def foo():\n        print('hello')\n        x = 1\n        y = 2\n        return x + y";
+        let mut ctx = TransformContext {
+            content_type: Some(ContentType::ShellBlock),
+            ..Default::default()
+        };
+        let transform = StructuralTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, input, "ShellBlock should skip structural detection");
+    }
+
+    #[test]
+    fn test_skip_for_list() {
+        let input = "    def foo():\n        print('hello')\n        x = 1\n        y = 2\n        return x + y";
+        let mut ctx = TransformContext {
+            content_type: Some(ContentType::List),
+            ..Default::default()
+        };
+        let transform = StructuralTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, input, "List should skip structural detection");
     }
 }

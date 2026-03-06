@@ -8,7 +8,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 use super::whitespace::{is_code_fence_line, is_shell_command};
-use super::{RuleFired, Transform, TransformContext};
+use super::{ContentType, RuleFired, Transform, TransformContext};
 
 static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\S+").unwrap());
 static FILENAME_RE: LazyLock<Regex> =
@@ -53,6 +53,11 @@ impl Transform for AutowrapTransform {
     }
 
     fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
+        // ShellBlock: wrap each command as a whole line
+        if ctx.content_type == Some(ContentType::ShellBlock) {
+            return self.wrap_shell_block(input, ctx);
+        }
+
         let lines: Vec<&str> = input.split('\n').collect();
         let mut output: Vec<String> = Vec::new();
         let mut in_fence = false;
@@ -82,6 +87,41 @@ impl Transform for AutowrapTransform {
             if wrapped != line {
                 chars_changed += wrapped.len().saturating_sub(line.len());
             }
+            output.push(wrapped);
+        }
+
+        if chars_changed > 0 {
+            ctx.rules_fired.push(RuleFired {
+                stage: "auto_wrapper",
+                description: format!("wrapped {} bytes of code-like tokens", chars_changed),
+                chars_changed,
+            });
+        }
+
+        output.join("\n")
+    }
+}
+
+impl AutowrapTransform {
+    /// ShellBlock mode: wrap each non-empty, non-comment line as a whole command.
+    fn wrap_shell_block(&self, input: &str, ctx: &mut TransformContext) -> String {
+        let lines: Vec<&str> = input.split('\n').collect();
+        let mut output: Vec<String> = Vec::new();
+        let mut chars_changed = 0usize;
+
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                output.push(line.to_string());
+                continue;
+            }
+            // Already wrapped — leave alone (idempotency)
+            if trimmed.starts_with('`') && trimmed.ends_with('`') {
+                output.push(line.to_string());
+                continue;
+            }
+            let wrapped = format!("`{}`", trimmed);
+            chars_changed += 2;
             output.push(wrapped);
         }
 
@@ -414,4 +454,41 @@ mod tests {
         let result = transform.apply(input, &mut ctx);
         assert_eq!(result, "This is (a test) of the system");
     }
+
+    #[test]
+    fn test_shell_block_whole_line_wrapping() {
+        let input = "rm -rf /tmp/foo\ncp -r ~/src /tmp/";
+        let mut ctx = TransformContext {
+            content_type: Some(ContentType::ShellBlock),
+            ..Default::default()
+        };
+        let transform = AutowrapTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, "`rm -rf /tmp/foo`\n`cp -r ~/src /tmp/`");
+    }
+
+    #[test]
+    fn test_shell_block_preserves_comments() {
+        let input = "# Install deps\ncargo build --release";
+        let mut ctx = TransformContext {
+            content_type: Some(ContentType::ShellBlock),
+            ..Default::default()
+        };
+        let transform = AutowrapTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, "# Install deps\n`cargo build --release`");
+    }
+
+    #[test]
+    fn test_shell_block_idempotent() {
+        let input = "`rm -rf /tmp/foo`\n`cp -r ~/src /tmp/`";
+        let mut ctx = TransformContext {
+            content_type: Some(ContentType::ShellBlock),
+            ..Default::default()
+        };
+        let transform = AutowrapTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, input, "Shell block wrapping must be idempotent");
+    }
+
 }
