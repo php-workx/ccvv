@@ -28,12 +28,16 @@ build-mac:
   cd mac && ./build.sh --skip-rust
 
 # Full macOS build (rebuild Rust lib first).
-build-mac-full:
+build:
   cd mac && ./build.sh
 
-# Install latest built mac app bundle.
-install-mac:
-  cd mac && ditto build/ccvv.app /Applications/ccvv.app
+# Install latest built mac app bundle (kills running app first, relaunches after).
+install:
+  pkill -x ccvv || true
+  cd mac && ./build.sh
+  rm -rf /Applications/ccvv.app
+  ditto build/ccvv.app /Applications/ccvv.app
+  open /Applications/ccvv.app
 
 # Static code security scan (Semgrep).
 semgrep:
