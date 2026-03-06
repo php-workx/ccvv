@@ -8,6 +8,7 @@ core/target/
 .agents/
 
 .DS_STORE
+.beta-counter
 .idea
 firebase-debug.log
 /.sonarqube/

@@ -86,6 +86,21 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
 cp Info.plist "$APP_BUNDLE/Contents/"
+
+# Stamp beta version for local dev builds (skip for --notarize release builds)
+if [[ "$NOTARIZE" -eq 0 ]]; then
+    COUNTER_FILE="$SCRIPT_DIR/../.beta-counter"
+    BETA_NUM=1
+    if [[ -f "$COUNTER_FILE" ]]; then
+        BETA_NUM=$(( $(cat "$COUNTER_FILE") + 1 ))
+    fi
+    echo "$BETA_NUM" > "$COUNTER_FILE"
+    BASE_VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist")
+    BETA_VER="${BASE_VER}-beta${BETA_NUM}"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BETA_VER" "$APP_BUNDLE/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BETA_VER" "$APP_BUNDLE/Contents/Info.plist"
+    echo "  Version: $BETA_VER"
+fi
 if [[ -f "$SCRIPT_DIR/assets/ccvv.icns" ]]; then
     cp "$SCRIPT_DIR/assets/ccvv.icns" "$APP_BUNDLE/Contents/Resources/ccvv.icns"
 else
