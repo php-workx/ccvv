@@ -1,0 +1,4 @@
+  rm -rf /tmp/build
+  mkdir -p /tmp/build/output
+  cp -r ~/workspaces/ccvv/mac/build/ccvv.app /tmp/build/
+  cd /tmp/build && tar -czf ccvv.tar.gz ccvv.app
