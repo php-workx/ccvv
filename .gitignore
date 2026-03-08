@@ -7,10 +7,10 @@ core/target/
 # AgentOps session artifacts
 .agents/
 
+.env
 .DS_STORE
 .beta-counter
 .idea
 firebase-debug.log
 /.sonarqube/
 /.scannerwork/
-sonar-project.properties
