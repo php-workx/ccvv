@@ -52,7 +52,7 @@ shellcheck:
   #!/usr/bin/env bash
   set -euo pipefail
   command -v shellcheck >/dev/null 2>&1 || { echo "shellcheck not found. Install: brew install shellcheck"; exit 1; }
-  find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*' -print0 | xargs -0 shellcheck --
+  { find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*' -print0; find .githooks -maxdepth 1 -type f -print0 2>/dev/null; } | xargs -0 shellcheck --
 
 # Dependency vulnerability audit.
 audit:
@@ -240,8 +240,11 @@ dev-setup:
 # Common local preflight.
 dev: fmt lint test
 
-# PR-grade quality gate (coverage already runs all tests, so skip the separate test step).
-check: fmt lint semgrep shellcheck audit coverage sonar
+# Local quality gate (no SonarQube required) — used by pre-push hook.
+check-local: fmt lint semgrep shellcheck audit coverage
+
+# Full quality gate including SonarQube.
+check: check-local sonar
 
 # Full validation incl. coverage output.
 check-all: check coverage-html
