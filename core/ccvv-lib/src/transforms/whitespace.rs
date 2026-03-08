@@ -325,66 +325,99 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
 pub fn compact_paragraph_with_width(lines: &[ParagraphLine], terminal_width: usize) -> String {
     let joined = join_shell_continuations(lines);
     let lines = &joined;
-    let mut output_lines: Vec<String> = Vec::new();
-    let mut buffer = String::new();
-    let mut last_buffer_raw_len: usize = 0;
-    let base_indent = lines.iter().map(|l| l.indent).min().unwrap_or(0);
-    let mut last_list_item_rel_indent: usize = 0;
+    let mut state = CompactState::new(lines);
 
     for entry in lines {
-        let relative_indent = entry.indent.saturating_sub(base_indent);
+        let relative_indent = entry.indent.saturating_sub(state.base_indent);
+        state.process_line(entry, relative_indent, terminal_width);
+    }
 
-        if is_list_item(&entry.text) {
-            if !buffer.is_empty() {
-                output_lines.push(buffer.clone());
-                buffer.clear();
-            }
-            last_list_item_rel_indent = relative_indent;
-            last_buffer_raw_len = 0;
-            let indent_str = " ".repeat(relative_indent);
-            output_lines.push(format!("{}{}", indent_str, entry.text));
-        } else if is_shell_command(&entry.text) {
-            // Shell commands stay on their own line, like list items.
-            if !buffer.is_empty() {
-                output_lines.push(buffer.clone());
-                buffer.clear();
-            }
-            last_buffer_raw_len = 0;
-            output_lines.push(entry.text.clone());
-        } else if !output_lines.is_empty()
-            && is_list_item_with_optional_indent(output_lines.last().unwrap())
-            && buffer.is_empty()
-            && relative_indent >= last_list_item_rel_indent
-        {
-            // Continuation of a list item
-            let last = output_lines.last_mut().unwrap();
-            last.push(' ');
-            last.push_str(&entry.text);
-        } else {
-            // Regular paragraph continuation — apply reverse word-wrap heuristic
-            // Also preserve break after heading/label lines ending with ':'
-            if !buffer.is_empty()
-                && (buffer.ends_with(':')
-                    || should_keep_break(terminal_width, last_buffer_raw_len, &entry.text))
-            {
-                output_lines.push(buffer.clone());
-                buffer.clear();
-            }
-            if buffer.is_empty() {
-                buffer = entry.text.clone();
-            } else {
-                buffer.push(' ');
-                buffer.push_str(&entry.text);
-            }
-            last_buffer_raw_len = entry.raw_len;
+    state.finish()
+}
+
+/// Mutable state for paragraph compaction, extracted to reduce cognitive
+/// complexity of the main loop.
+struct CompactState {
+    output_lines: Vec<String>,
+    buffer: String,
+    last_buffer_raw_len: usize,
+    base_indent: usize,
+    last_list_item_rel_indent: usize,
+}
+
+impl CompactState {
+    fn new(lines: &[ParagraphLine]) -> Self {
+        Self {
+            output_lines: Vec::new(),
+            buffer: String::new(),
+            last_buffer_raw_len: 0,
+            base_indent: lines.iter().map(|l| l.indent).min().unwrap_or(0),
+            last_list_item_rel_indent: 0,
         }
     }
 
-    if !buffer.is_empty() {
-        output_lines.push(buffer);
+    fn process_line(
+        &mut self,
+        entry: &ParagraphLine,
+        relative_indent: usize,
+        terminal_width: usize,
+    ) {
+        if is_list_item(&entry.text) {
+            self.flush_buffer();
+            self.last_list_item_rel_indent = relative_indent;
+            let indent_str = " ".repeat(relative_indent);
+            self.output_lines
+                .push(format!("{}{}", indent_str, entry.text));
+        } else if is_shell_command(&entry.text) {
+            self.flush_buffer();
+            self.output_lines.push(entry.text.clone());
+        } else if self.is_list_continuation(relative_indent) {
+            let last = self.output_lines.last_mut().unwrap();
+            last.push(' ');
+            last.push_str(&entry.text);
+        } else {
+            self.append_prose(entry, terminal_width);
+        }
     }
 
-    output_lines.join("\n")
+    fn is_list_continuation(&self, relative_indent: usize) -> bool {
+        !self.output_lines.is_empty()
+            && is_list_item_with_optional_indent(self.output_lines.last().unwrap())
+            && self.buffer.is_empty()
+            && relative_indent >= self.last_list_item_rel_indent
+    }
+
+    fn append_prose(&mut self, entry: &ParagraphLine, terminal_width: usize) {
+        if !self.buffer.is_empty()
+            && (self.buffer.ends_with(':')
+                || should_keep_break(terminal_width, self.last_buffer_raw_len, &entry.text))
+        {
+            self.output_lines.push(self.buffer.clone());
+            self.buffer.clear();
+        }
+        if self.buffer.is_empty() {
+            self.buffer = entry.text.clone();
+        } else {
+            self.buffer.push(' ');
+            self.buffer.push_str(&entry.text);
+        }
+        self.last_buffer_raw_len = entry.raw_len;
+    }
+
+    fn flush_buffer(&mut self) {
+        if !self.buffer.is_empty() {
+            self.output_lines.push(self.buffer.clone());
+            self.buffer.clear();
+        }
+        self.last_buffer_raw_len = 0;
+    }
+
+    fn finish(mut self) -> String {
+        if !self.buffer.is_empty() {
+            self.output_lines.push(self.buffer);
+        }
+        self.output_lines.join("\n")
+    }
 }
 
 /// Reverse word-wrap heuristic: if the previous raw line was short enough

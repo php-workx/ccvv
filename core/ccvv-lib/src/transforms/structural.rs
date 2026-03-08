@@ -269,56 +269,11 @@ impl StructuralTransform {
             return None;
         }
 
-        // Shebang is unambiguous — always fence
         let has_shebang = input.starts_with("#!");
-
-        // Language keyword detection
         let lang = detect_language(input);
 
-        if has_shebang {
-            // Skip scoring, go straight to fencing
-        } else {
-            // Multi-signal scoring: need ≥2 positive signals, prose can veto
-            let mut score: i32 = 0;
-
-            // +1: high indentation ratio
-            let indented_count = non_empty
-                .iter()
-                .filter(|l| l.starts_with(' ') || l.starts_with('\t'))
-                .count();
-            if indented_count * 100 / non_empty.len() >= 40 {
-                score += 1;
-            }
-
-            // +1: language keywords detected
-            if lang.is_some() {
-                score += 1;
-            }
-
-            // +1: syntax density ({, }, ; on ≥15% of lines)
-            let syntax_lines = non_empty
-                .iter()
-                .filter(|l| l.contains('{') || l.contains('}') || l.contains(';'))
-                .count();
-            if syntax_lines * 100 / non_empty.len() >= 15 {
-                score += 1;
-            }
-
-            // -2: prose signal (≥30% of lines end with sentence punctuation)
-            let prose_lines = non_empty
-                .iter()
-                .filter(|l| {
-                    let t = l.trim();
-                    t.ends_with('.') || t.ends_with('?') || t.ends_with('!')
-                })
-                .count();
-            if prose_lines * 100 / non_empty.len() >= 30 {
-                score -= 2;
-            }
-
-            if score < 2 {
-                return None;
-            }
+        if !has_shebang && !passes_code_score(&non_empty, &lang) {
+            return None;
         }
 
         let lang_hint = lang.unwrap_or("");
@@ -427,6 +382,49 @@ fn detect_language(input: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Multi-signal scoring for code fence detection. Returns `true` when ≥2
+/// positive signals are present and prose doesn't veto.
+fn passes_code_score(non_empty: &[&&str], lang: &Option<&str>) -> bool {
+    let mut score: i32 = 0;
+
+    // +1: high indentation ratio
+    let indented_count = non_empty
+        .iter()
+        .filter(|l| l.starts_with(' ') || l.starts_with('\t'))
+        .count();
+    if indented_count * 100 / non_empty.len() >= 40 {
+        score += 1;
+    }
+
+    // +1: language keywords detected
+    if lang.is_some() {
+        score += 1;
+    }
+
+    // +1: syntax density ({, }, ; on ≥15% of lines)
+    let syntax_lines = non_empty
+        .iter()
+        .filter(|l| l.contains('{') || l.contains('}') || l.contains(';'))
+        .count();
+    if syntax_lines * 100 / non_empty.len() >= 15 {
+        score += 1;
+    }
+
+    // -2: prose signal (≥30% of lines end with sentence punctuation)
+    let prose_lines = non_empty
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.ends_with('.') || t.ends_with('?') || t.ends_with('!')
+        })
+        .count();
+    if prose_lines * 100 / non_empty.len() >= 30 {
+        score -= 2;
+    }
+
+    score >= 2
 }
 
 #[cfg(test)]

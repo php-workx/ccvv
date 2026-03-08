@@ -23,10 +23,7 @@ pub fn classify(text: &str) -> ContentType {
     }
 
     // Single URL check
-    if !trimmed.contains('\n')
-        && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
-        && !trimmed.contains(' ')
-    {
+    if is_single_url(trimmed) {
         return ContentType::Url;
     }
 
@@ -38,36 +35,12 @@ pub fn classify(text: &str) -> ContentType {
         return ContentType::ShellBlock;
     }
 
-    // Code detection: shebang is unambiguous; otherwise require indentation
-    // AND no strong prose signal (indented prose from CLIs is common)
-    if lines.len() > 3 {
-        if trimmed.starts_with("#!") {
-            return ContentType::Code;
-        }
-        let indented = lines
-            .iter()
-            .filter(|l| !l.is_empty() && l.starts_with([' ', '\t']))
-            .count();
-        if !non_empty.is_empty() && indented * 100 / non_empty.len() >= 40 {
-            let prose_lines = non_empty
-                .iter()
-                .filter(|l| {
-                    let t = l.trim();
-                    t.ends_with('.') || t.ends_with('?') || t.ends_with('!')
-                })
-                .count();
-            if prose_lines * 100 / non_empty.len() < 30 {
-                return ContentType::Code;
-            }
-        }
+    if is_code_like(trimmed, &lines, &non_empty) {
+        return ContentType::Code;
     }
 
-    // List detection: ≥60% of non-empty lines are list items, ≥2 non-empty lines
-    if non_empty.len() >= 2 {
-        let list_count = non_empty.iter().filter(|l| is_list_item(l.trim())).count();
-        if list_count * 100 / non_empty.len() >= 60 {
-            return ContentType::List;
-        }
+    if is_list_like(&non_empty) {
+        return ContentType::List;
     }
 
     // Default
@@ -76,6 +49,57 @@ pub fn classify(text: &str) -> ContentType {
     } else {
         ContentType::Mixed
     }
+}
+
+/// Check if content is a single URL (one line, starts with http(s)://, no spaces).
+fn is_single_url(trimmed: &str) -> bool {
+    !trimmed.contains('\n')
+        && (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+        && !trimmed.contains(' ')
+}
+
+/// Code detection: shebang is unambiguous; otherwise require high indentation
+/// ratio AND no strong prose signal (indented prose from CLIs is common).
+fn is_code_like(trimmed: &str, lines: &[&str], non_empty: &[&str]) -> bool {
+    if lines.len() <= 3 {
+        return false;
+    }
+    if trimmed.starts_with("#!") {
+        return true;
+    }
+    let indented = lines
+        .iter()
+        .filter(|l| !l.is_empty() && l.starts_with([' ', '\t']))
+        .count();
+    if non_empty.is_empty() || indented * 100 / non_empty.len() < 40 {
+        return false;
+    }
+    let prose_ratio = prose_line_ratio(non_empty);
+    prose_ratio < 30
+}
+
+/// List detection: ≥60% of non-empty lines are list items, ≥2 non-empty lines.
+fn is_list_like(non_empty: &[&str]) -> bool {
+    if non_empty.len() < 2 {
+        return false;
+    }
+    let list_count = non_empty.iter().filter(|l| is_list_item(l.trim())).count();
+    list_count * 100 / non_empty.len() >= 60
+}
+
+/// Percentage of lines that end with sentence punctuation (., ?, !).
+fn prose_line_ratio(non_empty: &[&str]) -> usize {
+    if non_empty.is_empty() {
+        return 0;
+    }
+    let prose_lines = non_empty
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.ends_with('.') || t.ends_with('?') || t.ends_with('!')
+        })
+        .count();
+    prose_lines * 100 / non_empty.len()
 }
 
 /// Check if a single line is shell-like: a shell command, comment, shebang,
