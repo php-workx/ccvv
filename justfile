@@ -183,6 +183,60 @@ sonar-setup:
     "$SONAR_URL/api/new_code_periods/set?project=$PROJECT_KEY&type=REFERENCE_BRANCH&value=main"
   echo "Done. Token written to .env, new code period set to main. Run: just sonar"
 
+# Install all development tooling required by the quality gate.
+dev-setup:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  ok=true
+
+  ensure_brew() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+      printf 'Installing %s via Homebrew...\n' "$1"
+      brew install "$1"
+    else
+      printf '✓ %s\n' "$1"
+    fi
+  }
+
+  ensure_cargo() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+      printf 'Installing %s via cargo...\n' "$1"
+      cargo install "$1"
+    else
+      printf '✓ %s\n' "$1"
+    fi
+  }
+
+  # Homebrew tools
+  command -v brew >/dev/null 2>&1 || { echo "Homebrew is required. Install from https://brew.sh"; exit 1; }
+  ensure_brew shellcheck
+  ensure_brew semgrep
+  ensure_brew jq
+
+  # Cargo tools
+  command -v cargo >/dev/null 2>&1 || { echo "Rust toolchain is required. Install from https://rustup.rs"; exit 1; }
+  ensure_cargo cargo-audit
+  ensure_cargo cargo-llvm-cov
+
+  # Rustup components
+  if rustup component list --installed | grep -q llvm-tools; then
+    printf '✓ llvm-tools-preview\n'
+  else
+    printf 'Installing llvm-tools-preview via rustup...\n'
+    rustup component add llvm-tools-preview
+  fi
+
+  # Git hooks
+  HOOKS=$(cd "$(git rev-parse --show-toplevel)" && git config core.hooksPath 2>/dev/null || true)
+  if [ "$HOOKS" = ".githooks" ]; then
+    printf '✓ git hooks\n'
+  else
+    printf 'Configuring git hooks path...\n'
+    git config core.hooksPath .githooks
+  fi
+
+  printf '\nDev setup complete. Run: just check\n'
+
 # Common local preflight.
 dev: fmt lint test
 
