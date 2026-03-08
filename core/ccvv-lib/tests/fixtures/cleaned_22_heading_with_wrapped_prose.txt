@@ -1,0 +1,11 @@
+Infrastructure Overview:
+The cluster runs on EKS in us-east-1 with managed node groups spanning two availability zones. Each node group uses spot instances for non-critical workloads and on-demand instances for the production services requiring high uptime guarantees.
+
+Networking:
+  - VPC spans three `AZs` with public and private subnets in each zone for full redundancy
+  - NAT gateways deployed per-AZ for high availability and fault isolation
+  - Transit gateway connects to the shared services VPC and on-premises data center via Direct Connect with automatic failover
+  - Security groups follow least-privilege and are validated by automated compliance checks every six hours
+
+Deployment Pipeline:
+All changes flow through a three-stage pipeline. First the CDK synth step validates `CloudFormation` templates against organizational policies. Then a full integration test suite runs against an ephemeral environment. Finally a canary deployment rolls out to production with automatic rollback if the error rate exceeds the configured threshold.

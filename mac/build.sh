@@ -33,7 +33,7 @@ if [[ "$SKIP_RUST" -eq 0 ]]; then
         echo "Error: cargo not found. Install Rust from https://rustup.rs"
         exit 1
     fi
-    (cd "$CORE_DIR" && cargo build --package ccvv-lib --release)
+    (cd "$CORE_DIR" && cargo build --package ccvv-lib --package ccvv-cli --release)
 
     # Find the generated header
     RUST_OUT_DIR=$(cd "$CORE_DIR" && cargo metadata --format-version 1 2>/dev/null \
@@ -86,10 +86,33 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
 cp Info.plist "$APP_BUNDLE/Contents/"
+
+# Stamp beta version for local dev builds (skip for --notarize release builds)
+if [[ "$NOTARIZE" -eq 0 ]]; then
+    COUNTER_FILE="$SCRIPT_DIR/../.beta-counter"
+    BETA_NUM=1
+    if [[ -f "$COUNTER_FILE" ]]; then
+        BETA_NUM=$(( $(cat "$COUNTER_FILE") + 1 ))
+    fi
+    echo "$BETA_NUM" > "$COUNTER_FILE"
+    BASE_VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist")
+    # CFBundleVersion must be digits-and-dots per Apple docs; store beta label in custom key
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BASE_VER}.${BETA_NUM}" "$APP_BUNDLE/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Add :CCVVBetaLabel string beta${BETA_NUM}" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set :CCVVBetaLabel beta${BETA_NUM}" "$APP_BUNDLE/Contents/Info.plist"
+    echo "  Version: ${BASE_VER} (build ${BASE_VER}.${BETA_NUM})"
+fi
 if [[ -f "$SCRIPT_DIR/assets/ccvv.icns" ]]; then
     cp "$SCRIPT_DIR/assets/ccvv.icns" "$APP_BUNDLE/Contents/Resources/ccvv.icns"
 else
     echo "Warning: icon asset missing at $SCRIPT_DIR/assets/ccvv.icns"
+fi
+
+# Copy CLI binary into bundle if it was built
+CLI_PATH="${RUST_OUT_DIR:-$CORE_DIR/target}/release/ccvv"
+if [[ -f "$CLI_PATH" ]]; then
+    cp "$CLI_PATH" "$APP_BUNDLE/Contents/MacOS/ccvv-cli"
+    echo "  CLI binary: $APP_BUNDLE/Contents/MacOS/ccvv-cli"
 fi
 
 echo "Signing..."
@@ -100,6 +123,11 @@ if [[ -z "$SIGN_ID" ]]; then
 fi
 
 if [[ -n "$SIGN_ID" ]]; then
+    # Sign the CLI binary separately (must be signed before the bundle)
+    if [[ -f "$APP_BUNDLE/Contents/MacOS/ccvv-cli" ]]; then
+        codesign --force --options runtime \
+            --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/ccvv-cli"
+    fi
     codesign --force --options runtime \
         --entitlements ccvv.entitlements \
         --sign "$SIGN_ID" "$APP_BUNDLE"

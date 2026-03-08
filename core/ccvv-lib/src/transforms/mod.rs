@@ -16,6 +16,8 @@ pub mod whitespace;
 /// Stages read and annotate this to communicate downstream.
 #[derive(Debug, Clone, Default)]
 pub struct TransformContext {
+    /// Set by `Pipeline::run()` via `classify()` before stages execute.
+    /// Stages may refine this (e.g., structural detection upgrades to `Code`/`Json`/`Table`).
     pub content_type: Option<ContentType>,
     pub rules_fired: Vec<RuleFired>,
     pub profile: Option<String>,
@@ -41,6 +43,8 @@ pub enum ContentType {
     Table,
     Json,
     Mixed,
+    ShellBlock,
+    List,
 }
 
 /// Every pipeline stage implements this trait.

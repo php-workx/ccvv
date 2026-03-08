@@ -32,6 +32,15 @@ impl Transform for StructuralTransform {
     }
 
     fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
+        // Skip structural detection for shell blocks and lists —
+        // these should not be JSON-prettified, table-converted, or fence-wrapped
+        if matches!(
+            ctx.content_type,
+            Some(ContentType::ShellBlock | ContentType::List)
+        ) {
+            return input.to_string();
+        }
+
         let trimmed = input.trim();
 
         // Already fenced content — skip
@@ -239,6 +248,11 @@ impl StructuralTransform {
     }
 
     /// Attempt code fence wrapping.
+    ///
+    /// Uses a multi-signal scoring system to avoid false positives on
+    /// indented prose (common in CLI-copied text). Shebang is unambiguous
+    /// and always triggers. Otherwise, requires ≥2 positive signals and
+    /// no strong prose signal.
     fn try_code_fence(&self, input: &str, ctx: &mut TransformContext) -> Option<String> {
         let lines: Vec<&str> = input.lines().collect();
         if lines.len() <= 3 {
@@ -255,21 +269,10 @@ impl StructuralTransform {
             return None;
         }
 
-        // Check shebang
         let has_shebang = input.starts_with("#!");
-
-        // Check indentation ratio
-        let indented_count = non_empty
-            .iter()
-            .filter(|l| l.starts_with(' ') || l.starts_with('\t'))
-            .count();
-        let indent_ratio = indented_count * 100 / non_empty.len();
-
-        // Language keyword detection
         let lang = detect_language(input);
-        let has_lang_signal = lang.is_some();
 
-        if !has_shebang && indent_ratio < 40 && !has_lang_signal {
+        if !has_shebang && !passes_code_score(&non_empty, &lang) {
             return None;
         }
 
@@ -379,6 +382,49 @@ fn detect_language(input: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Multi-signal scoring for code fence detection. Returns `true` when ≥2
+/// positive signals are present and prose doesn't veto.
+fn passes_code_score(non_empty: &[&&str], lang: &Option<&str>) -> bool {
+    let mut score: i32 = 0;
+
+    // +1: high indentation ratio
+    let indented_count = non_empty
+        .iter()
+        .filter(|l| l.starts_with(' ') || l.starts_with('\t'))
+        .count();
+    if indented_count * 100 / non_empty.len() >= 40 {
+        score += 1;
+    }
+
+    // +1: language keywords detected
+    if lang.is_some() {
+        score += 1;
+    }
+
+    // +1: syntax density ({, }, ; on ≥15% of lines)
+    let syntax_lines = non_empty
+        .iter()
+        .filter(|l| l.contains('{') || l.contains('}') || l.contains(';'))
+        .count();
+    if syntax_lines * 100 / non_empty.len() >= 15 {
+        score += 1;
+    }
+
+    // -2: prose signal (≥30% of lines end with sentence punctuation)
+    let prose_lines = non_empty
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.ends_with('.') || t.ends_with('?') || t.ends_with('!')
+        })
+        .count();
+    if prose_lines * 100 / non_empty.len() >= 30 {
+        score -= 2;
+    }
+
+    score >= 2
 }
 
 #[cfg(test)]
@@ -510,6 +556,45 @@ mod tests {
         assert_eq!(
             first, second,
             "Structural JSON transform must be idempotent"
+        );
+    }
+
+    #[test]
+    fn test_skip_for_shell_block() {
+        let input = "    def foo():\n        print('hello')\n        x = 1\n        y = 2\n        return x + y";
+        let mut ctx = TransformContext {
+            content_type: Some(ContentType::ShellBlock),
+            ..Default::default()
+        };
+        let transform = StructuralTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, input, "ShellBlock should skip structural detection");
+    }
+
+    #[test]
+    fn test_skip_for_list() {
+        let input = "    def foo():\n        print('hello')\n        x = 1\n        y = 2\n        return x + y";
+        let mut ctx = TransformContext {
+            content_type: Some(ContentType::List),
+            ..Default::default()
+        };
+        let transform = StructuralTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, input, "List should skip structural detection");
+    }
+
+    #[test]
+    fn test_indented_prose_not_fenced() {
+        // Indented prose from CLI with "from" and "import" as English words
+        // should NOT be fence-wrapped despite indentation + keyword matches
+        let input = "  1. EKS endpoint made private.\n  The change broke kubectl from outside the VPC.\n\n  2. Lambda moved into the VPC.\n  This required importing VPC properties from the cluster.\n\n  3. CDK auto-exported those properties.\n  The merge conflict sealed the trap.";
+        let mut ctx = TransformContext::default();
+        let transform = StructuralTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert!(
+            !result.starts_with("```"),
+            "Indented prose should not be fence-wrapped, got: {}",
+            &result[..result.len().min(80)]
         );
     }
 }

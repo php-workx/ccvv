@@ -4,6 +4,7 @@
 //! sensitive content filtering, and inter-stage expansion checks.
 //! See §5.2 of the technical spec.
 
+use crate::classify::classify;
 use crate::secrets::SecretFilter;
 use crate::transforms::{Transform, TransformContext};
 
@@ -78,6 +79,9 @@ impl Pipeline {
             return (input.to_string(), ctx);
         }
 
+        // Pre-scan: classify content type before stages run
+        ctx.content_type = Some(classify(input));
+
         let original_len = input.len();
         let mut text = input.to_string();
 
@@ -115,6 +119,9 @@ impl Pipeline {
             ctx.skipped_sensitive = true;
             return (input.to_string(), ctx);
         }
+
+        // Pre-scan: classify content type before stages run
+        ctx.content_type = Some(classify(input));
 
         let original_len = input.len();
         let mut text = input.to_string();

@@ -1,0 +1,8 @@
+When you write if let DoubleTapSetting::Fixed(ms) = settings.double_tap_window_ms where settings: &Settings,
+  Rust's match ergonomics (RFC 2005, stable since Rust 1.26) automatically insert a ref binding. The compiler sees
+  the scrutinee is behind a reference, so it matches by reference — ms becomes a u32 copy (since u32: Copy). There
+  is no move of the DoubleTapSetting enum itself.
+
+  The bot's statement that "Rust's Copy trait is all-or-nothing per type, not per variant" is true in isolation but
+  irrelevant here — match ergonomics mean the enum is never moved. The compiler doesn't need the enum to be Copy
+  because it's pattern-matching through a reference.

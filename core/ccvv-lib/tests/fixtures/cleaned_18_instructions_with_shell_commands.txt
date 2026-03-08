@@ -1,0 +1,9 @@
+The running app has a lock on the files. You need to:
+
+1. Quit the running ccvv (click the [cc] menu bar icon → Quit)
+2. Then install and relaunch:
+
+# After quitting ccvv:
+`rm -rf /Applications/ccvv.app`
+`cp -r ~/workspaces/ccvv/build/ccvv.app /Applications/`
+`open /Applications/ccvv.app`

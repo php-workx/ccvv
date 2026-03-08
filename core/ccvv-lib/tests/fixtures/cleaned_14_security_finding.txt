@@ -1,0 +1,1 @@
+1. Frontend/Backend ALB `SGs` allow `0.0.0.0/0:443` -- direct internet access bypasses the `CloudFront` WAF. Fix: restrict to `CloudFront` managed prefix list.

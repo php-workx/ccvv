@@ -1,0 +1,8 @@
+The icon only appears for entries that have the raw text stored — which means only entries created
+  after the storeRaw: true change. All your existing history entries were created before that, so they
+  have no raw text and no icon.
+
+  To test it:
+
+  1. Delete the old history: rm ~/.ccvv/history.db
+  2. Restart ccvv

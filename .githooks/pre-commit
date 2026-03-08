@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fast pre-commit checks — mirrors `just dev` (fmt + lint + test).
+# Install: git config core.hooksPath .githooks
+
+# Git hooks run in a minimal env — ensure Homebrew/Cargo are on PATH.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
+
+printf '=== pre-commit: fmt ===\n'
+cd core && cargo fmt --all -- --check
+
+printf '=== pre-commit: clippy ===\n'
+cargo clippy --workspace --all-targets -- -D warnings
+
+printf '=== pre-commit: test ===\n'
+cargo test --workspace --quiet

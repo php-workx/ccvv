@@ -6,7 +6,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use super::{RuleFired, Transform, TransformContext};
+use super::{ContentType, RuleFired, Transform, TransformContext};
 
 /// URL detection regex.
 static URL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s<>"')\]]+"#).unwrap());
@@ -94,6 +94,11 @@ impl Transform for UrlTransform {
     }
 
     fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
+        // Skip URL cleaning for shell blocks — URLs are command arguments
+        if ctx.content_type == Some(ContentType::ShellBlock) {
+            return input.to_string();
+        }
+
         let mut total_changed = 0usize;
         let mut in_fence = false;
         let lines: Vec<&str> = input.split('\n').collect();
@@ -403,6 +408,18 @@ mod tests {
             "domain-specific deny should strip"
         );
         assert!(result.contains("id=1"), "non-denied params preserved");
+    }
+
+    #[test]
+    fn test_skip_for_shell_block() {
+        let input = "curl https://example.com?utm_source=google";
+        let mut ctx = TransformContext {
+            content_type: Some(ContentType::ShellBlock),
+            ..Default::default()
+        };
+        let transform = UrlTransform::new();
+        let result = transform.apply(input, &mut ctx);
+        assert_eq!(result, input, "ShellBlock should skip URL cleaning");
     }
 
     #[test]

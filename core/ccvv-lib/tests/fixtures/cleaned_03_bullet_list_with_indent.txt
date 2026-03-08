@@ -1,0 +1,6 @@
+Better HUD copy is action-based:
+
+- Removed tracking parameters
+- Normalized text formatting
+- Removed hidden characters
+- Copied cleaned text
