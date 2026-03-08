@@ -76,7 +76,8 @@ impl Transform for AutowrapTransform {
             // Wrap entire shell command lines in backticks rather than
             // wrapping individual tokens (paths, flags) separately.
             let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('`') && is_shell_command(trimmed) {
+            let already_wrapped = trimmed.starts_with('`') && trimmed.ends_with('`');
+            if !trimmed.is_empty() && !already_wrapped && is_shell_command(trimmed) {
                 let wrapped = format!("`{}`", trimmed);
                 chars_changed += 2;
                 output.push(wrapped);

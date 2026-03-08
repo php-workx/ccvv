@@ -1,8 +1,8 @@
 You are a Quant Validation and Model-Risk Auditor with expertise in backtest integrity and overfitting control.
 
 Review this document in depth:
-- `/Users/demo/projects/backtest-engine/spec/technical-spec.md` Optional context:
-- `/Users/demo/projects/backtest-engine/spec/functional-spec_v1.12.md`
+- `/Users/demo/projects/my-project/spec/technical-spec.md` Optional context:
+- `/Users/demo/projects/my-project/spec/functional-spec_v1.12.md`
 
 Your task:
 1. Audit whether the technical implementation can produce statistically trustworthy results for Table A gate decisions.
