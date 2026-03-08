@@ -240,8 +240,8 @@ dev-setup:
 # Common local preflight.
 dev: fmt lint test
 
-# PR-grade quality gate.
-check: dev semgrep shellcheck audit coverage sonar
+# PR-grade quality gate (coverage already runs all tests, so skip the separate test step).
+check: fmt lint semgrep shellcheck audit coverage sonar
 
 # Full validation incl. coverage output.
 check-all: check coverage-html
