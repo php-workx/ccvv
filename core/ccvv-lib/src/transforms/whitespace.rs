@@ -360,7 +360,11 @@ pub fn compact_paragraph_with_width(lines: &[ParagraphLine], terminal_width: usi
             last.push_str(&entry.text);
         } else {
             // Regular paragraph continuation — apply reverse word-wrap heuristic
-            if !buffer.is_empty() && should_keep_break(terminal_width, last_buffer_raw_len, &entry.text) {
+            // Also preserve break after heading/label lines ending with ':'
+            if !buffer.is_empty()
+                && (buffer.ends_with(':')
+                    || should_keep_break(terminal_width, last_buffer_raw_len, &entry.text))
+            {
                 output_lines.push(buffer.clone());
                 buffer.clear();
             }

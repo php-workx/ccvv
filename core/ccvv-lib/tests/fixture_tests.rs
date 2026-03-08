@@ -221,3 +221,16 @@ fixture_idempotency_test!(
     idempotent_21_pure_list,
     "raw_21_pure_list.txt"
 );
+
+fixture_test!(
+    fixture_22_heading_with_wrapped_prose,
+    "raw_22_heading_with_wrapped_prose.txt",
+    "cleaned_22_heading_with_wrapped_prose.txt"
+);
+
+// ===== Idempotency for fixture 22 =====
+
+fixture_idempotency_test!(
+    idempotent_22_heading_with_wrapped_prose,
+    "raw_22_heading_with_wrapped_prose.txt"
+);
