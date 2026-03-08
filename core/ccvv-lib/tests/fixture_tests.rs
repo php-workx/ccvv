@@ -81,6 +81,7 @@ fixture_test!(
 
 // Table fixtures (#05, #06, #08, #09) are excluded — the app routes table
 // content through the interactive TableCellPicker, not the pipeline.
+// Fixtures #07, #15, #16 were never created (numbering gaps are intentional).
 
 fixture_test!(
     fixture_10_multi_paragraph_prompt,
