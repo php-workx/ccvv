@@ -96,10 +96,11 @@ if [[ "$NOTARIZE" -eq 0 ]]; then
     fi
     echo "$BETA_NUM" > "$COUNTER_FILE"
     BASE_VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist")
-    BETA_VER="${BASE_VER}-beta${BETA_NUM}"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BETA_VER" "$APP_BUNDLE/Contents/Info.plist"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BETA_VER" "$APP_BUNDLE/Contents/Info.plist"
-    echo "  Version: $BETA_VER"
+    # CFBundleVersion must be digits-and-dots per Apple docs; store beta label in custom key
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BASE_VER}.${BETA_NUM}" "$APP_BUNDLE/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Add :CCVVBetaLabel string beta${BETA_NUM}" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set :CCVVBetaLabel beta${BETA_NUM}" "$APP_BUNDLE/Contents/Info.plist"
+    echo "  Version: ${BASE_VER} (build ${BASE_VER}.${BETA_NUM})"
 fi
 if [[ -f "$SCRIPT_DIR/assets/ccvv.icns" ]]; then
     cp "$SCRIPT_DIR/assets/ccvv.icns" "$APP_BUNDLE/Contents/Resources/ccvv.icns"
