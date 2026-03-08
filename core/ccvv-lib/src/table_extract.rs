@@ -730,7 +730,10 @@ fn try_delimiter(lines: &[&str], delimiter: char) -> Option<ParseCandidate> {
         *freq.entry(row.len()).or_insert(0) += 1;
     }
     let (&most_common_cols, &count) = freq.iter().max_by_key(|(_, c)| *c)?;
-    if most_common_cols < 2 || count * 100 / split_lines.len() < 80 {
+    // Comma requires ≥3 columns — prose naturally has one comma per sentence,
+    // so 2-column comma splits produce false positives on ordinary text.
+    let min_cols: usize = if delimiter == ',' { 3 } else { 2 };
+    if most_common_cols < min_cols || count * 100 / split_lines.len() < 80 {
         return None;
     }
 
@@ -953,5 +956,15 @@ production-web-server │ Port 8080 SG rule removed entirely (open: false   │
         let parsed = extract_table(input).apply_gate(false, 0.75);
         assert!(!parsed.detected);
         assert!(parsed.rows.is_empty());
+    }
+
+    #[test]
+    fn prose_with_commas_not_detected_as_table() {
+        let input = "  The double-tap detection window (~400ms) dominates the perceived latency, and that's\n  intentional UX design, not a bottleneck.";
+        let parsed = extract_table(input);
+        assert!(
+            !parsed.detected,
+            "Prose with commas should not be detected as a table"
+        );
     }
 }
