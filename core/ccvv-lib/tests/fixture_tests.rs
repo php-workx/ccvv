@@ -217,10 +217,7 @@ fixture_idempotency_test!(
     "raw_20_pure_shell_block.txt"
 );
 
-fixture_idempotency_test!(
-    idempotent_21_pure_list,
-    "raw_21_pure_list.txt"
-);
+fixture_idempotency_test!(idempotent_21_pure_list, "raw_21_pure_list.txt");
 
 fixture_test!(
     fixture_22_heading_with_wrapped_prose,

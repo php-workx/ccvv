@@ -246,7 +246,11 @@ fn detect_terminal_width(raw_lines: &[&str]) -> usize {
         if count > best_count || (count == best_count && len > best_max) {
             best_count = count;
             // Use the maximum length in this cluster as the terminal width
-            best_max = raw_lengths[i..i + count].iter().copied().max().unwrap_or(len);
+            best_max = raw_lengths[i..i + count]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(len);
         }
     }
 
@@ -256,8 +260,6 @@ fn detect_terminal_width(raw_lines: &[&str]) -> usize {
         0
     }
 }
-
-
 
 /// Check if a line is a list item.
 pub fn is_list_item(line: &str) -> bool {
@@ -410,10 +412,46 @@ fn is_list_item_with_optional_indent(line: &str) -> bool {
 
 /// Known shell commands for standalone-line detection.
 const SHELL_COMMANDS: &[&str] = &[
-    "rm", "cp", "mv", "mkdir", "chmod", "ln", "touch", "cd", "ls", "open", "brew", "npm",
-    "yarn", "pip", "pip3", "cargo", "go", "make", "git", "docker", "curl", "wget", "ssh", "scp",
-    "tar", "sudo", "python", "python3", "node", "cat", "echo", "export", "source", "xcrun",
-    "aws", "gcloud", "az", "kubectl", "terraform", "helm",
+    "rm",
+    "cp",
+    "mv",
+    "mkdir",
+    "chmod",
+    "ln",
+    "touch",
+    "cd",
+    "ls",
+    "open",
+    "brew",
+    "npm",
+    "yarn",
+    "pip",
+    "pip3",
+    "cargo",
+    "go",
+    "make",
+    "git",
+    "docker",
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "tar",
+    "sudo",
+    "python",
+    "python3",
+    "node",
+    "cat",
+    "echo",
+    "export",
+    "source",
+    "xcrun",
+    "aws",
+    "gcloud",
+    "az",
+    "kubectl",
+    "terraform",
+    "helm",
 ];
 
 /// Check if a line looks like a standalone shell command.
@@ -555,9 +593,7 @@ fn ccvv_code_passthrough(input: &str) -> String {
         .map(|line| {
             let trimmed = line.trim_start();
             if trimmed.starts_with('\u{23FA}') {
-                let rest = trimmed
-                    .trim_start_matches('\u{23FA}')
-                    .trim_start();
+                let rest = trimmed.trim_start_matches('\u{23FA}').trim_start();
                 let ws = &line[..line.len() - trimmed.len()];
                 format!("{}{}", ws, rest)
             } else {
@@ -701,7 +737,8 @@ mod tests {
 
     #[test]
     fn test_terminal_wrapped_multiple_continuations() {
-        let input = "  - Long list item that wraps\n  at the terminal boundary and\n  continues further";
+        let input =
+            "  - Long list item that wraps\n  at the terminal boundary and\n  continues further";
         let result = ccvv(input);
         assert_eq!(
             result,
@@ -713,12 +750,16 @@ mod tests {
     fn test_shell_block_no_compaction() {
         let input = "rm -rf /tmp/foo\ncp -r ~/src /tmp/\nmkdir -p /tmp/out";
         let result = ccvv_shell_block(input);
-        assert_eq!(result, "rm -rf /tmp/foo\ncp -r ~/src /tmp/\nmkdir -p /tmp/out");
+        assert_eq!(
+            result,
+            "rm -rf /tmp/foo\ncp -r ~/src /tmp/\nmkdir -p /tmp/out"
+        );
     }
 
     #[test]
     fn test_shell_block_joins_continuations() {
-        let input = "aws rds wait \\\n  --db-instance-identifier staging \\\n  --region eu-central-1";
+        let input =
+            "aws rds wait \\\n  --db-instance-identifier staging \\\n  --region eu-central-1";
         let result = ccvv_shell_block(input);
         assert_eq!(
             result,

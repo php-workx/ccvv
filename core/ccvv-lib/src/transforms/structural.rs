@@ -34,7 +34,10 @@ impl Transform for StructuralTransform {
     fn apply(&self, input: &str, ctx: &mut TransformContext) -> String {
         // Skip structural detection for shell blocks and lists —
         // these should not be JSON-prettified, table-converted, or fence-wrapped
-        if matches!(ctx.content_type, Some(ContentType::ShellBlock | ContentType::List)) {
+        if matches!(
+            ctx.content_type,
+            Some(ContentType::ShellBlock | ContentType::List)
+        ) {
             return input.to_string();
         }
 

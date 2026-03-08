@@ -5,8 +5,8 @@
 //! See §7 of the technical spec.
 
 use crate::table_extract::extract_table;
-use crate::transforms::ContentType;
 use crate::transforms::whitespace::{is_list_item, is_shell_command};
+use crate::transforms::ContentType;
 
 /// Classify the content type of the given text.
 pub fn classify(text: &str) -> ContentType {
@@ -100,7 +100,9 @@ fn is_shell_line(line: &str) -> bool {
     }
     // Standalone flags (--flag or -f) as continuation of a prior command.
     // Excludes markdown horizontal rules (---) and PEM markers (-----BEGIN).
-    if (trimmed.starts_with("--") && trimmed.len() > 2 && trimmed.as_bytes()[2].is_ascii_alphanumeric())
+    if (trimmed.starts_with("--")
+        && trimmed.len() > 2
+        && trimmed.as_bytes()[2].is_ascii_alphanumeric())
         || (trimmed.starts_with('-')
             && trimmed.len() > 1
             && trimmed.as_bytes()[1] != b' '
@@ -226,7 +228,8 @@ mod tests {
 
     #[test]
     fn test_classify_pem_block_not_shell_block() {
-        let input = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
+        let input =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
         assert_ne!(classify(input), ContentType::ShellBlock);
     }
 

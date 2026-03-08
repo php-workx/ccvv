@@ -490,5 +490,4 @@ mod tests {
         let result = transform.apply(input, &mut ctx);
         assert_eq!(result, input, "Shell block wrapping must be idempotent");
     }
-
 }
