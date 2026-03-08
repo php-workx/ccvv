@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Full quality gate before push — mirrors `just check`.
+# Requires: semgrep, shellcheck, cargo-audit, cargo-llvm-cov, sonar-scanner (optional).
+# Install: git config core.hooksPath .githooks
+
+printf '=== pre-push: running full quality gate (just check) ===\n'
+just check
