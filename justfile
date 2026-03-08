@@ -97,10 +97,10 @@ sonar:
   # 2. Run sonar-scanner
   printf '\n=== SonarQube Scan ===\n'
   if command -v sonar-scanner >/dev/null 2>&1; then
-    sonar-scanner -Dsonar.token="$TOKEN"
+    sonar-scanner -Dsonar.token="$TOKEN" -Dsonar.qualitygate.wait=true
   elif command -v docker >/dev/null 2>&1; then
     docker run --rm -e SONAR_TOKEN -v "$(pwd):/usr/src" \
-      sonarsource/sonar-scanner-cli:latest -Dsonar.token="$TOKEN"
+      sonarsource/sonar-scanner-cli:latest -Dsonar.token="$TOKEN" -Dsonar.qualitygate.wait=true
   else
     echo "Need sonar-scanner or docker."
     exit 1
@@ -128,8 +128,7 @@ sonar:
   ISSUES=$(curl -sf "${AUTH[@]}" "$SONAR_URL/api/issues/search?componentKeys=$PROJECT_KEY&statuses=OPEN,CONFIRMED&ps=15&s=SEVERITY&asc=false")
   TOTAL=$(echo "$ISSUES" | jq '.total')
   printf '  Total open: %s\n\n' "$TOTAL"
-  echo "$ISSUES" | jq -r '.issues[] | "  \(.severity | ascii_downgrade) | \(.component | split(":")[1] // .component):\(.line // "?") | \(.message | .[0:100])"' 2>/dev/null || \
-  echo "$ISSUES" | jq -r '.issues[] | "  \(.severity) | \(.component | split(":")[1] // .component):\(.line // "?") | \(.message | .[0:100])"'
+  echo "$ISSUES" | jq -r '.issues[] | "  \(.severity | ascii_downcase) | \(.component | split(":")[1] // .component):\(.line // "?") | \(.message | .[0:100])"'
 
   printf '\n=== Security Hotspots ===\n'
   HOTSPOTS=$(curl -sf "${AUTH[@]}" "$SONAR_URL/api/hotspots/search?projectKey=$PROJECT_KEY&ps=10")
@@ -235,7 +234,8 @@ dev-setup:
     git config core.hooksPath .githooks
   fi
 
-  printf '\nDev setup complete. Run: just check\n'
+  printf '\nDev setup complete. Run: just dev\n'
+  printf 'For the full quality gate (incl. SonarQube): just sonar-setup && just check\n'
 
 # Common local preflight.
 dev: fmt lint test

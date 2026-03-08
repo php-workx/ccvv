@@ -2,11 +2,11 @@
 set -euo pipefail
 
 # Full quality gate before push — mirrors `just check`.
-# Requires: semgrep, shellcheck, cargo-audit, cargo-llvm-cov, sonar-scanner (optional).
+# Requires: just, semgrep, shellcheck, cargo-audit, cargo-llvm-cov, sonar-scanner (optional).
 # Install: git config core.hooksPath .githooks
 
 # Git hooks run in a minimal env — ensure Homebrew/Cargo are on PATH.
-export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
 
 printf '=== pre-push: running full quality gate (just check) ===\n'
 just check
