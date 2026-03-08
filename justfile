@@ -52,12 +52,7 @@ shellcheck:
   #!/usr/bin/env bash
   set -euo pipefail
   command -v shellcheck >/dev/null 2>&1 || { echo "shellcheck not found. Install: brew install shellcheck"; exit 1; }
-  mapfile -t scripts < <(find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*')
-  if [ ${#scripts[@]} -eq 0 ]; then
-    echo "No shell scripts found."
-    exit 0
-  fi
-  shellcheck -- "${scripts[@]}"
+  find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*' -print0 | xargs -0 shellcheck --
 
 # Dependency vulnerability audit.
 audit:
