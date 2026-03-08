@@ -725,7 +725,7 @@ class CcvvCore {
 
 // MARK: - App Delegate
 
-let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.0"
+let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.5.0"
 
 let logFile: FileHandle? = {
     let path = NSHomeDirectory() + "/Library/Logs/ccvv.log"
