@@ -69,12 +69,67 @@ fn push_newline(output: &mut String) {
 }
 
 fn html_unescape(input: &str) -> String {
-    input
-        .replace("&nbsp;", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '&' {
+            output.push(ch);
+            continue;
+        }
+
+        // Collect entity up to ';'
+        let mut entity = String::new();
+        let mut found_semi = false;
+        for _ in 0..10 {
+            match chars.peek() {
+                Some(&';') => {
+                    chars.next();
+                    found_semi = true;
+                    break;
+                }
+                Some(_) => entity.push(chars.next().unwrap()),
+                None => break,
+            }
+        }
+
+        if !found_semi {
+            output.push('&');
+            output.push_str(&entity);
+            continue;
+        }
+
+        match entity.as_str() {
+            "nbsp" => output.push(' '),
+            "lt" => output.push('<'),
+            "gt" => output.push('>'),
+            "amp" => output.push('&'),
+            "quot" => output.push('"'),
+            "apos" => output.push('\''),
+            _ if entity.starts_with('#') => {
+                let code_point = if entity.starts_with("#x") || entity.starts_with("#X") {
+                    u32::from_str_radix(&entity[2..], 16).ok()
+                } else {
+                    entity[1..].parse::<u32>().ok()
+                };
+                match code_point.and_then(char::from_u32) {
+                    Some(decoded) => output.push(decoded),
+                    None => {
+                        output.push('&');
+                        output.push_str(&entity);
+                        output.push(';');
+                    }
+                }
+            }
+            _ => {
+                output.push('&');
+                output.push_str(&entity);
+                output.push(';');
+            }
+        }
+    }
+
+    output
 }
 
 #[cfg(test)]

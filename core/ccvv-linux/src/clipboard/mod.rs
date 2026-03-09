@@ -40,7 +40,9 @@ pub fn acquire_text_candidate(
 
     let available_targets: Vec<&str> = offers.keys().map(String::as_str).collect();
     let target = pick_text_target(&available_targets).ok_or(AcquisitionError::NoTextTarget)?;
-    let plain_text = String::from_utf8_lossy(offers.get(target).unwrap()).into_owned();
+    let plain_text =
+        String::from_utf8_lossy(offers.get(target).ok_or(AcquisitionError::NoTextTarget)?)
+            .into_owned();
 
     Ok(TextCandidate {
         plain_text,
