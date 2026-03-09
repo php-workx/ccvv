@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "wave": 3,
+  "timestamp": "2026-03-09T07:40:39+01:00",
+  "tasks_completed": ["Issue 3", "Issue 8"],
+  "tasks_failed": [],
+  "files_changed": [
+    "core/Cargo.lock",
+    "core/ccvv-linux/Cargo.toml",
+    "core/ccvv-linux/src/backend/mod.rs",
+    "core/ccvv-linux/src/backend/none.rs",
+    "core/ccvv-linux/src/bin/ccvv-indicator-legacy.rs",
+    "core/ccvv-linux/src/bin/ccvv-tray-sni.rs",
+    "core/ccvv-linux/src/clipboard/html.rs",
+    "core/ccvv-linux/src/clipboard/mod.rs",
+    "core/ccvv-linux/src/clipboard/targets.rs",
+    "core/ccvv-linux/src/detection.rs",
+    "core/ccvv-linux/src/lib.rs",
+    "core/ccvv-linux/src/main.rs",
+    "core/ccvv-linux/src/tray.rs",
+    "core/ccvv-linux/src/ui_protocol.rs"
+  ],
+  "git_sha": "df3697ade1952aa1de1ea644ccd6b1ed15464e7c",
+  "acceptance_verdict": "PASS",
+  "commit_strategy": "wave-batch"
+}

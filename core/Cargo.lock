@@ -190,6 +190,7 @@ version = "1.5.0"
 dependencies = [
  "ccvv-lib",
  "clap",
+ "sha2",
  "thiserror",
 ]
 

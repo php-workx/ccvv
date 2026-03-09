@@ -1,11 +1,7 @@
-mod app;
-mod control;
-mod single_instance;
-mod ui_protocol;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use ccvv_linux::app;
 use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

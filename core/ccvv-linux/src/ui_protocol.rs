@@ -65,6 +65,50 @@ impl StatusSnapshot {
             self.paused, self.backend, self.capability, self.last_clean_succeeded
         )
     }
+
+    pub fn decode_line(value: &str) -> Option<Self> {
+        let mut paused = None;
+        let mut backend = None;
+        let mut capability = None;
+        let mut last_clean_succeeded = None;
+
+        for part in value.split(';') {
+            let (key, value) = part.split_once('=')?;
+            match key {
+                "paused" => paused = Some(matches!(value, "true")),
+                "backend" => backend = parse_backend_mode(value),
+                "capability" => capability = parse_backend_capability(value),
+                "last_clean_succeeded" => last_clean_succeeded = Some(matches!(value, "true")),
+                _ => return None,
+            }
+        }
+
+        Some(Self {
+            paused: paused?,
+            backend: backend?,
+            capability: capability?,
+            last_clean_succeeded: last_clean_succeeded?,
+        })
+    }
+}
+
+fn parse_backend_mode(value: &str) -> Option<BackendMode> {
+    match value {
+        "X11" => Some(BackendMode::X11),
+        "Wayland" => Some(BackendMode::Wayland),
+        "Limited" => Some(BackendMode::Limited),
+        "None" => Some(BackendMode::None),
+        _ => None,
+    }
+}
+
+fn parse_backend_capability(value: &str) -> Option<BackendCapability> {
+    match value {
+        "Automatic" => Some(BackendCapability::Automatic),
+        "Limited" => Some(BackendCapability::Limited),
+        "DiagnosticsOnly" => Some(BackendCapability::DiagnosticsOnly),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -93,5 +137,20 @@ mod tests {
         let encoded = snapshot.encode_line();
         assert!(encoded.contains("paused=false"));
         assert!(!encoded.contains("clipboard"));
+    }
+
+    #[test]
+    fn test_status_snapshot_round_trip() {
+        let snapshot = StatusSnapshot {
+            paused: true,
+            backend: BackendMode::Limited,
+            capability: BackendCapability::Limited,
+            last_clean_succeeded: false,
+        };
+
+        assert_eq!(
+            StatusSnapshot::decode_line(&snapshot.encode_line()),
+            Some(snapshot)
+        );
     }
 }
