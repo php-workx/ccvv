@@ -517,4 +517,47 @@ mod tests {
         assert!(matches!(error, RuntimeError::MissingAcknowledgement));
         handle.join().unwrap();
     }
+
+    #[test]
+    fn test_forward_command_response_is_bounded() {
+        let home_dir = temp_dir("home");
+        let runtime_dir = temp_dir("runtime");
+        let paths = RuntimePaths::from_roots(home_dir, runtime_dir, None);
+
+        prepare_runtime(&paths).unwrap();
+        let listener = bind_socket(&paths.socket_path).unwrap();
+        let socket_path = paths.socket_path.clone();
+
+        // Server sends more than MAX_COMMAND_BYTES
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_command(&mut stream).unwrap();
+            let oversized = "x".repeat(MAX_COMMAND_BYTES + 1024);
+            stream.write_all(oversized.as_bytes()).ok();
+        });
+
+        let response = forward_command(&socket_path, ControlCommand::GetStatus).unwrap();
+
+        assert!(response.len() <= MAX_COMMAND_BYTES);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_connection_guard_decrements_on_drop() {
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        {
+            let _guard = ConnectionGuard::acquire(&counter);
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+            {
+                let _guard2 = ConnectionGuard::acquire(&counter);
+                assert_eq!(counter.load(Ordering::SeqCst), 2);
+            }
+            // _guard2 dropped
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+        }
+        // _guard dropped
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
 }
