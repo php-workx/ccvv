@@ -1,7 +1,7 @@
 pub mod app;
 pub mod backend;
-pub mod clipboard;
-pub mod control;
+pub(crate) mod clipboard;
+pub(crate) mod control;
 pub(crate) mod detection;
 pub(crate) mod single_instance;
 pub mod tray;

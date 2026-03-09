@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ControlCommand {
     Pause,
     Resume,
@@ -11,6 +12,7 @@ pub enum ControlCommand {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BackendMode {
     X11,
     Wayland,
@@ -19,6 +21,7 @@ pub enum BackendMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BackendCapability {
     Automatic,
     Limited,
@@ -26,11 +29,23 @@ pub enum BackendCapability {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct StatusSnapshot {
     pub paused: bool,
     pub backend: BackendMode,
     pub capability: BackendCapability,
     pub last_clean_succeeded: bool,
+}
+
+impl StatusSnapshot {
+    pub fn new(paused: bool, backend: BackendMode, capability: BackendCapability) -> Self {
+        Self {
+            paused,
+            backend,
+            capability,
+            last_clean_succeeded: true,
+        }
+    }
 }
 
 impl ControlCommand {

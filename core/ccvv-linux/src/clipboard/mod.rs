@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use crate::clipboard::html::{extract_plain_text_from_html, HtmlExtractError};

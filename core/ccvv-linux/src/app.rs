@@ -23,12 +23,14 @@ use crate::single_instance::{acquire_single_instance, InstanceGuard};
 use crate::ui_protocol::{BackendCapability, BackendMode, ControlCommand, StatusSnapshot};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BackendOverride {
     Auto,
     None,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RuntimeBackend {
     None,
     X11,
@@ -37,10 +39,25 @@ pub enum RuntimeBackend {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct AppOptions {
     pub backend: BackendOverride,
     pub config_path: Option<PathBuf>,
     pub profile: Option<String>,
+}
+
+impl AppOptions {
+    pub fn new(
+        backend: BackendOverride,
+        config_path: Option<PathBuf>,
+        profile: Option<String>,
+    ) -> Self {
+        Self {
+            backend,
+            config_path,
+            profile,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -52,6 +69,7 @@ pub(crate) struct Bootstrap {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AppError {
     #[error(transparent)]
     Config(#[from] CcvvError),
@@ -95,8 +113,16 @@ pub fn run(options: AppOptions) -> Result<(), AppError> {
     // Install signal handler for graceful shutdown
     let signal_quit = Arc::new(AtomicBool::new(false));
     let signal_quit_flag = signal_quit.clone();
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, signal_quit.clone());
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, signal_quit.clone());
+    if let Err(error) =
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, signal_quit.clone())
+    {
+        eprintln!("ccvv-linux: warning: failed to register SIGTERM handler: {error}");
+    }
+    if let Err(error) =
+        signal_hook::flag::register(signal_hook::consts::SIGINT, signal_quit.clone())
+    {
+        eprintln!("ccvv-linux: warning: failed to register SIGINT handler: {error}");
+    }
 
     let (loop_errors_tx, loop_errors_rx) = mpsc::channel::<Result<(), AppError>>();
     let socket_state = daemon_state.clone();

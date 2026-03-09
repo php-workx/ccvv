@@ -41,11 +41,7 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let options = app::AppOptions {
-        backend: cli.backend.into(),
-        config_path: cli.config,
-        profile: cli.profile,
-    };
+    let options = app::AppOptions::new(cli.backend.into(), cli.config, cli.profile);
 
     match app::run(options) {
         Ok(()) => ExitCode::SUCCESS,

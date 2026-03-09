@@ -4,12 +4,14 @@ use thiserror::Error;
 use crate::ui_protocol::BackendCapability;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SelectionKind {
     Clipboard,
     Primary,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct ClipboardSnapshot {
     pub seat_id: String,
     pub selection_kind: SelectionKind,
@@ -20,9 +22,37 @@ pub struct ClipboardSnapshot {
     pub is_self_write: bool,
 }
 
+impl ClipboardSnapshot {
+    pub fn new(
+        text: impl Into<String>,
+        html: Option<String>,
+        seat_id: impl Into<String>,
+        serial: Option<u64>,
+    ) -> Self {
+        Self {
+            seat_id: seat_id.into(),
+            selection_kind: SelectionKind::Clipboard,
+            acquired_plain_text: text.into(),
+            acquired_html: html,
+            timestamp: 0,
+            backend_serial: serial,
+            is_self_write: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct WriteToken {
     pub backend_serial: Option<u64>,
+}
+
+impl WriteToken {
+    pub fn new(serial: Option<u64>) -> Self {
+        Self {
+            backend_serial: serial,
+        }
+    }
 }
 
 pub type BackendStream = mpsc::Receiver<Result<ClipboardSnapshot, BackendError>>;

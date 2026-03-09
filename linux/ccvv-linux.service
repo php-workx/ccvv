@@ -1,0 +1,13 @@
+[Unit]
+Description=ccvv clipboard sanitizer daemon
+Documentation=https://github.com/runger/ccvv
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ccvv-linux --backend auto
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

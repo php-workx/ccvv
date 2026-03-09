@@ -115,7 +115,9 @@ pub fn forward_command(path: &Path, command: ControlCommand) -> Result<String, R
     stream.shutdown(Shutdown::Write)?;
 
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+    stream
+        .take(MAX_COMMAND_BYTES as u64)
+        .read_to_string(&mut response)?;
     if response.trim().is_empty() {
         return Err(RuntimeError::MissingAcknowledgement);
     }
@@ -226,6 +228,25 @@ impl DaemonState {
     }
 }
 
+struct ConnectionGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl ConnectionGuard {
+    fn acquire(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self {
+            counter: counter.clone(),
+        }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub fn serve(listener: UnixListener, state: DaemonState) -> Result<(), RuntimeError> {
     listener.set_nonblocking(true)?;
     let active_clients = Arc::new(AtomicUsize::new(0));
@@ -233,18 +254,17 @@ pub fn serve(listener: UnixListener, state: DaemonState) -> Result<(), RuntimeEr
     while !state.is_quitting() {
         match listener.accept() {
             Ok((stream, _)) => {
-                if active_clients.load(Ordering::Relaxed) >= MAX_CONCURRENT_CLIENTS {
+                if active_clients.load(Ordering::SeqCst) >= MAX_CONCURRENT_CLIENTS {
                     drop(stream);
                     continue;
                 }
                 let state = state.clone();
-                let active = active_clients.clone();
-                active.fetch_add(1, Ordering::Relaxed);
+                let guard = ConnectionGuard::acquire(&active_clients);
                 thread::spawn(move || {
+                    let _guard = guard;
                     if let Err(error) = handle_client(stream, state) {
                         eprintln!("ccvv-linux: client handler error: {error}");
                     }
-                    active.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
