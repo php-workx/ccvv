@@ -1,3 +1,4 @@
+use std::sync::mpsc;
 use thiserror::Error;
 
 use crate::ui_protocol::BackendCapability;
@@ -24,17 +25,32 @@ pub struct WriteToken {
     pub backend_serial: Option<u64>,
 }
 
+pub type BackendStream = mpsc::Receiver<Result<ClipboardSnapshot, BackendError>>;
+
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BackendError {
     #[error("backend is unavailable in the current session")]
     Unavailable,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("backend protocol error: {0}")]
+    Protocol(String),
+    #[error("session ended")]
+    SessionEnded,
 }
 
-pub trait ClipboardBackend {
+pub trait ClipboardBackend: Send {
     fn capability(&self) -> BackendCapability;
+    fn subscribe(&mut self) -> Result<BackendStream, BackendError> {
+        Err(BackendError::Unavailable)
+    }
     fn read_snapshot(&mut self) -> Result<ClipboardSnapshot, BackendError>;
     fn write_plain_text(&mut self, text: &str) -> Result<WriteToken, BackendError>;
     fn source_name(&self) -> &'static str;
 }
 
 pub mod none;
+pub mod stub;
+pub mod wayland;
+pub mod x11;

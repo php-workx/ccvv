@@ -33,10 +33,7 @@ impl ClipboardBackend for NoneBackend {
     }
 
     fn source_name(&self) -> &'static str {
-        match self.last_written_text {
-            Some(_) => "none-write",
-            None => "none",
-        }
+        "none"
     }
 }
 

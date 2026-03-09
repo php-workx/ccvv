@@ -93,7 +93,6 @@ pub fn bind_socket(path: &Path) -> Result<UnixListener, RuntimeError> {
 }
 
 pub fn read_command(stream: &mut UnixStream) -> Result<ControlCommand, RuntimeError> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buffer = String::new();
     stream
         .take(MAX_COMMAND_BYTES as u64)
@@ -259,6 +258,7 @@ pub fn serve(listener: UnixListener, state: DaemonState) -> Result<(), RuntimeEr
 }
 
 fn handle_client(mut stream: UnixStream, state: DaemonState) -> Result<(), RuntimeError> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     match read_command(&mut stream)? {
         ControlCommand::GetStatus => write_status(&mut stream, &state.snapshot())?,
         ControlCommand::Pause => {

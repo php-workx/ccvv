@@ -58,11 +58,54 @@ impl ControlCommand {
     }
 }
 
+impl BackendMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendMode::X11 => "X11",
+            BackendMode::Wayland => "Wayland",
+            BackendMode::Limited => "Limited",
+            BackendMode::None => "None",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "X11" => Some(BackendMode::X11),
+            "Wayland" => Some(BackendMode::Wayland),
+            "Limited" => Some(BackendMode::Limited),
+            "None" => Some(BackendMode::None),
+            _ => None,
+        }
+    }
+}
+
+impl BackendCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendCapability::Automatic => "Automatic",
+            BackendCapability::Limited => "Limited",
+            BackendCapability::DiagnosticsOnly => "DiagnosticsOnly",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "Automatic" => Some(BackendCapability::Automatic),
+            "Limited" => Some(BackendCapability::Limited),
+            "DiagnosticsOnly" => Some(BackendCapability::DiagnosticsOnly),
+            _ => None,
+        }
+    }
+}
+
 impl StatusSnapshot {
     pub fn encode_line(&self) -> String {
         format!(
-            "paused={};backend={:?};capability={:?};last_clean_succeeded={}",
-            self.paused, self.backend, self.capability, self.last_clean_succeeded
+            "paused={};backend={};capability={};last_clean_succeeded={}",
+            self.paused,
+            self.backend.as_str(),
+            self.capability.as_str(),
+            self.last_clean_succeeded
         )
     }
 
@@ -76,10 +119,10 @@ impl StatusSnapshot {
             let (key, value) = part.split_once('=')?;
             match key {
                 "paused" => paused = Some(matches!(value, "true")),
-                "backend" => backend = parse_backend_mode(value),
-                "capability" => capability = parse_backend_capability(value),
+                "backend" => backend = BackendMode::parse(value),
+                "capability" => capability = BackendCapability::parse(value),
                 "last_clean_succeeded" => last_clean_succeeded = Some(matches!(value, "true")),
-                _ => return None,
+                _ => {} // ignore unknown keys for forward compatibility
             }
         }
 
@@ -89,25 +132,6 @@ impl StatusSnapshot {
             capability: capability?,
             last_clean_succeeded: last_clean_succeeded?,
         })
-    }
-}
-
-fn parse_backend_mode(value: &str) -> Option<BackendMode> {
-    match value {
-        "X11" => Some(BackendMode::X11),
-        "Wayland" => Some(BackendMode::Wayland),
-        "Limited" => Some(BackendMode::Limited),
-        "None" => Some(BackendMode::None),
-        _ => None,
-    }
-}
-
-fn parse_backend_capability(value: &str) -> Option<BackendCapability> {
-    match value {
-        "Automatic" => Some(BackendCapability::Automatic),
-        "Limited" => Some(BackendCapability::Limited),
-        "DiagnosticsOnly" => Some(BackendCapability::DiagnosticsOnly),
-        _ => None,
     }
 }
 

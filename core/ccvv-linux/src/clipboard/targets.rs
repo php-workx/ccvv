@@ -11,7 +11,7 @@ pub enum HtmlPreference {
     PlainTextOnly,
 }
 
-pub fn pick_text_target<'a>(targets: &'a [&str]) -> Option<&'a str> {
+pub fn pick_text_target(targets: &[&str]) -> Option<&'static str> {
     [UTF8_PLAIN, UTF8_STRING, TEXT_PLAIN, TEXT, STRING]
         .into_iter()
         .find(|candidate| targets.iter().any(|target| target == candidate))

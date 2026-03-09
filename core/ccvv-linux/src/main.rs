@@ -10,6 +10,15 @@ enum BackendOverride {
     None,
 }
 
+impl From<BackendOverride> for app::BackendOverride {
+    fn from(value: BackendOverride) -> Self {
+        match value {
+            BackendOverride::Auto => app::BackendOverride::Auto,
+            BackendOverride::None => app::BackendOverride::None,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "ccvv-linux",
@@ -33,10 +42,7 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let options = app::AppOptions {
-        backend: match cli.backend {
-            BackendOverride::Auto => app::BackendOverride::Auto,
-            BackendOverride::None => app::BackendOverride::None,
-        },
+        backend: cli.backend.into(),
         config_path: cli.config,
         profile: cli.profile,
     };
