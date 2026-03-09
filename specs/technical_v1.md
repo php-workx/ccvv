@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Scope:** macOS-deep v1 — Rust core library, Swift macOS shell, CLI companion
-**Deferred:** Smart Paste (v2), Linux/Windows daemon (v2)
+**Deferred:** Smart Paste (v2), Windows daemon (v2)
 **Reference:** [`specs/functional.md`](functional_pre_v2.md)
 **Previous:** [`specs/technical_v1.0.md`](technical_v1.0.md)
 
@@ -35,13 +35,14 @@ ccvv v1 is composed of three compiled artifacts sharing a single transform engin
 - **ccvv-lib**: Rust library crate. Contains all text transformation logic, TOML config parsing, SQLite history, and content classification. Compiled as `staticlib` (for linking into Swift) and `cdylib` (for future dynamic loading). Exposes a C-ABI FFI surface.
 - **macOS App**: Swift/AppKit menu bar application. Handles platform-specific concerns: `NSPasteboard` access, `NSAttributedString` rich-text extraction, `CGEventTap` keyboard monitoring, `NSStatusItem` tray icon, and all UI. Calls ccvv-lib via C FFI for text transformation, config, and history.
 - **ccvv CLI**: Rust binary crate. Links ccvv-lib directly (native Rust API, no FFI). Provides stdin/stdout pipe transformation, history access, diagnostics, and config validation.
+- **ccvv-linux**: Rust binary crate. Linux daemon with pluggable clipboard backends (X11 via x11rb, Wayland via wayland-client), double-copy detection, Unix domain socket control, and SNI system tray integration (via ksni). GNOME limited mode defers to portal hotkeys when global key capture is unavailable. Installed via `make install`, autostarted via XDG autostart entry or systemd user unit.
 
 ### v1 Platform Scope
 
 | Platform | Artifact | Status              |
 |----------|----------|---------------------|
 | macOS (arm64 + x86_64) | App bundle + CLI binary | Full implementation |
-| Linux | Python script (`linux/ccvv`) | No implementation in v1 |
+| Linux (x86_64) | Rust daemon (`ccvv-linux`) + Python fallback | X11 + Wayland backends, SNI tray, systemd unit |
 | Windows | PowerShell script (`windows/ccvv.ps1`) | No implementation in v1 |
 
 ---
@@ -2268,7 +2269,7 @@ Network isolation verification. Fuzz testing. Permission tests. Config integrity
 |---------|---------------------|
 | Smart Paste (context-aware destination formatting) | Architecturally complex, fragile window detection |
 | "Paste As" chooser palette | Depends on Smart Paste infrastructure |
-| Linux daemon (X11/Wayland tray app) | Platform scope is macOS-deep for v1 |
+| Linux daemon — full Wayland data-control send + GNOME portal hotkey | Core X11/Wayland backends ship in v1; full write-back and portal hotkey need zbus |
 | Windows daemon (Win32 tray app) | Platform scope is macOS-deep for v1 |
 | Invisible mode (hide icon, haptic/screen-edge feedback) | Nice-to-have, not core |
 | Homebrew formula (build from source) | Cask (pre-built binary) is sufficient for v1 |
