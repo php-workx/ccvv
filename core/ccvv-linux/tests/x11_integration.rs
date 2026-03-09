@@ -1,22 +1,46 @@
 mod common;
 
+use ccvv_linux::backend::x11::X11Backend;
+use ccvv_linux::backend::ClipboardBackend;
+
 #[test]
-fn x11_integration_smoke_is_gated_by_environment() {
-    if common::has_x11_display() {
-        println!("x11 integration session available");
-    } else {
-        println!("{}", common::skip_message("x11"));
+fn x11_backend_source_name() {
+    let backend = X11Backend::new();
+    assert_eq!(backend.source_name(), "x11");
+}
+
+#[test]
+fn x11_backend_capability_is_automatic() {
+    let backend = X11Backend::new();
+    assert_eq!(
+        backend.capability(),
+        ccvv_linux::ui_protocol::BackendCapability::Automatic
+    );
+}
+
+#[test]
+fn x11_backend_read_without_display_returns_error() {
+    // On CI/macOS without X11, this should return Unavailable or Protocol error
+    let mut backend = X11Backend::new();
+    let result = backend.read_snapshot();
+    assert!(result.is_err(), "expected error without X11 display");
+}
+
+#[test]
+#[ignore = "requires live X11 display with clipboard access"]
+fn x11_read_write_round_trip() {
+    if !common::has_x11_display() {
+        return;
     }
-}
+    let mut backend = X11Backend::new();
+    let text = "ccvv-x11-integration-test-payload";
+    let token = backend
+        .write_plain_text(text)
+        .expect("write should succeed on live X11");
+    assert!(token.backend_serial.is_some());
 
-#[test]
-#[ignore = "requires X11 compositor and X11 clipboard integration test setup"]
-fn x11_integration_smoke() {
-    // TODO: add end-to-end X11 clipboard observation and INCR path checks.
-}
-
-#[test]
-#[ignore = "requires X11 compositor and integration fixtures"]
-fn x11_integration_incr_round_trip() {
-    // TODO: add INCR receive/send coverage once X11 backend backend support is implemented.
+    let snapshot = backend
+        .read_snapshot()
+        .expect("read should succeed after write");
+    assert_eq!(snapshot.acquired_plain_text, text);
 }

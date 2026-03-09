@@ -8,6 +8,75 @@ permissions:
   contents: write
 
 jobs:
+  linux-build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse version from tag
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxfixes-dev libwayland-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Update version in Cargo.toml
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" core/ccvv-lib/Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" core/ccvv-linux/Cargo.toml
+
+      - name: Build ccvv-linux
+        working-directory: core
+        run: |
+          cargo build --release --package ccvv-linux --target ${{ matrix.target }}
+
+      - name: Package Linux artifact
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          DIST="ccvv-linux-${VERSION}-${TARGET}"
+          mkdir -p "$DIST"
+          cp "core/target/${TARGET}/release/ccvv-linux" "$DIST/"
+          cp linux/ccvv-linux.desktop "$DIST/"
+          cp linux/ccvv-linux.service "$DIST/"
+          cp linux/Makefile "$DIST/"
+          tar czf "${DIST}.tar.gz" "$DIST"
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          ASSET="ccvv-linux-${VERSION}-${TARGET}.tar.gz"
+          if gh release view "$GITHUB_REF_NAME" &>/dev/null; then
+            gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ASSET" \
+              --title "ccvv $VERSION" --generate-notes
+          fi
+
   release:
     runs-on: macos-15
     env:

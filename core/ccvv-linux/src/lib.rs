@@ -3,6 +3,7 @@ pub mod backend;
 pub(crate) mod clipboard;
 pub(crate) mod control;
 pub(crate) mod detection;
+pub mod hotkey;
 pub(crate) mod single_instance;
 pub mod tray;
 pub mod ui_protocol;

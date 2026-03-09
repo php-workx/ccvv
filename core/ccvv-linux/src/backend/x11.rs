@@ -11,6 +11,7 @@ mod real {
         SelectionRequestEvent, Window, SELECTION_NOTIFY_EVENT,
     };
     use x11rb::rust_connection::RustConnection;
+    use x11rb::x11_utils::TryParse;
 
     use crate::backend::{
         BackendError, BackendStream, ClipboardBackend, ClipboardSnapshot, SelectionKind, WriteToken,
@@ -19,6 +20,9 @@ mod real {
 
     const SELECTION_TIMEOUT: Duration = Duration::from_secs(2);
     const POLL_INTERVAL: Duration = Duration::from_millis(50);
+    const INCR_THRESHOLD: usize = 256 * 1024; // 256 KiB
+    const INCR_CHUNK_SIZE: usize = 64 * 1024; // 64 KiB per INCR chunk
+    const INCR_MAX_SIZE: usize = 16 * 1024 * 1024; // 16 MiB cap
 
     #[derive(Debug)]
     pub struct X11Backend {
@@ -29,7 +33,13 @@ mod real {
         targets_atom: Atom,
         utf8_string_atom: Atom,
         ccvv_prop_atom: Atom,
+        incr_atom: Atom,
+        clipboard_manager_atom: Atom,
+        save_targets_atom: Atom,
+        has_clipboard_manager: bool,
         self_serial: u64,
+        /// Data currently offered via the CLIPBOARD selection (set by write_plain_text).
+        pending_write: Option<Vec<u8>>,
     }
 
     impl X11Backend {
@@ -68,6 +78,9 @@ mod real {
             let targets_atom = Self::intern_atom(&conn, b"TARGETS");
             let utf8_string_atom = Self::intern_atom(&conn, b"UTF8_STRING");
             let ccvv_prop_atom = Self::intern_atom(&conn, b"CCVV_SELECTION");
+            let incr_atom = Self::intern_atom(&conn, b"INCR");
+            let clipboard_manager_atom = Self::intern_atom(&conn, b"CLIPBOARD_MANAGER");
+            let save_targets_atom = Self::intern_atom(&conn, b"SAVE_TARGETS");
 
             if clipboard_atom == 0
                 || targets_atom == 0
@@ -75,6 +88,23 @@ mod real {
                 || ccvv_prop_atom == 0
             {
                 return Self::disconnected();
+            }
+
+            // Check for clipboard manager presence
+            let has_clipboard_manager = if clipboard_manager_atom != 0 {
+                conn.get_selection_owner(clipboard_manager_atom)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|r| r.owner != 0)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            if has_clipboard_manager {
+                eprintln!("ccvv-linux: clipboard manager detected, durability enhanced");
+            } else {
+                eprintln!("ccvv-linux: no clipboard manager detected");
             }
 
             // Enable XFixes clipboard change notifications
@@ -102,7 +132,12 @@ mod real {
                 targets_atom,
                 utf8_string_atom,
                 ccvv_prop_atom,
+                incr_atom,
+                clipboard_manager_atom,
+                save_targets_atom,
+                has_clipboard_manager,
                 self_serial: 0,
+                pending_write: None,
             }
         }
 
@@ -118,7 +153,12 @@ mod real {
                 targets_atom: 0,
                 utf8_string_atom: 0,
                 ccvv_prop_atom: 0,
+                incr_atom: 0,
+                clipboard_manager_atom: 0,
+                save_targets_atom: 0,
+                has_clipboard_manager: false,
                 self_serial: 0,
+                pending_write: None,
             }
         }
 
@@ -174,11 +214,11 @@ mod real {
                                 ));
                             }
 
-                            // Read the property data
+                            // Read the property data (may be INCR)
                             let prop = self
                                 .conn
                                 .get_property(
-                                    true,
+                                    false, // don't delete yet
                                     self.owner_window,
                                     self.ccvv_prop_atom,
                                     AtomEnum::ANY,
@@ -189,6 +229,26 @@ mod real {
                                 .reply()
                                 .map_err(|e| BackendError::Protocol(e.to_string()))?;
 
+                            // Check if this is an INCR transfer
+                            if self.incr_atom != 0 && prop.type_ == self.incr_atom {
+                                // INCR: delete property to signal readiness, then
+                                // accumulate chunks via PropertyNotify
+                                let _ = self
+                                    .conn
+                                    .delete_property(self.owner_window, self.ccvv_prop_atom);
+                                let _ = self.conn.change_window_attributes(
+                                    self.owner_window,
+                                    &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                                        .event_mask(EventMask::PROPERTY_CHANGE),
+                                );
+                                let _ = self.conn.flush();
+                                return self.receive_incr_chunks();
+                            }
+
+                            // Normal (non-INCR): delete property and return
+                            let _ = self
+                                .conn
+                                .delete_property(self.owner_window, self.ccvv_prop_atom);
                             return Ok(String::from_utf8_lossy(&prop.value).into_owned());
                         }
                     }
@@ -198,11 +258,262 @@ mod real {
 
             Err(BackendError::Protocol("selection timeout".into()))
         }
+
+        /// Receive INCR transfer chunks by watching PropertyNotify events.
+        fn receive_incr_chunks(&self) -> Result<String, BackendError> {
+            let mut buffer = Vec::new();
+            let incr_deadline = std::time::Instant::now() + Duration::from_secs(10);
+
+            while std::time::Instant::now() < incr_deadline {
+                if let Ok(Some(event)) = self.conn.poll_for_event() {
+                    let bytes = event.raw_bytes();
+                    // PropertyNotify = event type 28
+                    if !bytes.is_empty() && (bytes[0] & 0x7f) == 28 {
+                        let prop = self
+                            .conn
+                            .get_property(
+                                true, // delete after reading
+                                self.owner_window,
+                                self.ccvv_prop_atom,
+                                AtomEnum::ANY,
+                                0,
+                                1024 * 1024,
+                            )
+                            .map_err(|e| BackendError::Protocol(e.to_string()))?
+                            .reply()
+                            .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+                        if prop.value.is_empty() {
+                            // Empty property = INCR transfer complete
+                            break;
+                        }
+
+                        buffer.extend_from_slice(&prop.value);
+
+                        if buffer.len() > INCR_MAX_SIZE {
+                            return Err(BackendError::Protocol(format!(
+                                "INCR transfer exceeds {} MiB cap",
+                                INCR_MAX_SIZE / (1024 * 1024)
+                            )));
+                        }
+                    }
+                } else {
+                    thread::sleep(POLL_INTERVAL);
+                }
+            }
+
+            // Disable PropertyNotify after INCR completes
+            let _ = self.conn.change_window_attributes(
+                self.owner_window,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::NO_EVENT),
+            );
+            let _ = self.conn.flush();
+
+            Ok(String::from_utf8_lossy(&buffer).into_owned())
+        }
     }
 
     impl Default for X11Backend {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    // -- SelectionRequest handling (serves clipboard data to other X11 clients) --
+
+    impl X11Backend {
+        /// Process X11 events for a bounded duration, serving any SelectionRequest
+        /// that arrives so that other applications can read our clipboard content.
+        fn serve_selection_requests(&self, timeout: Duration) {
+            let deadline = std::time::Instant::now() + timeout;
+            let mut served = false;
+
+            while std::time::Instant::now() < deadline {
+                match self.conn.poll_for_event() {
+                    Ok(Some(event)) => {
+                        let bytes = event.raw_bytes();
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        let event_type = bytes[0] & 0x7f;
+                        // SelectionRequest = 30
+                        if event_type == 30 {
+                            if let Ok((req, _)) = SelectionRequestEvent::try_parse(bytes, &[]) {
+                                self.handle_selection_request(&req);
+                                served = true;
+                            }
+                        }
+                        // SelectionClear = 29 — we lost ownership
+                        if event_type == 29 {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        if served {
+                            break;
+                        }
+                        thread::sleep(POLL_INTERVAL);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        fn handle_selection_request(&self, req: &SelectionRequestEvent) {
+            let data = match &self.pending_write {
+                Some(d) => d,
+                None => {
+                    self.send_selection_notify(req, 0u32.into());
+                    return;
+                }
+            };
+
+            // If requestor did not specify a property, use the target atom
+            let property = if u32::from(req.property) == 0 {
+                req.target
+            } else {
+                req.property
+            };
+
+            if req.target == self.targets_atom {
+                // Respond with our supported TARGETS list
+                let targets_raw: Vec<u8> = [self.targets_atom, self.utf8_string_atom]
+                    .iter()
+                    .flat_map(|a| a.to_ne_bytes())
+                    .collect();
+                let _ = self.conn.change_property(
+                    x11rb::protocol::xproto::PropMode::REPLACE,
+                    req.requestor,
+                    property,
+                    AtomEnum::ATOM,
+                    32,
+                    2,
+                    &targets_raw,
+                );
+                self.send_selection_notify(req, property);
+            } else if req.target == self.utf8_string_atom {
+                if data.len() > INCR_THRESHOLD {
+                    self.send_incr_to_requestor(req, property, data);
+                } else {
+                    let _ = self.conn.change_property(
+                        x11rb::protocol::xproto::PropMode::REPLACE,
+                        req.requestor,
+                        property,
+                        self.utf8_string_atom,
+                        8,
+                        data.len() as u32,
+                        data,
+                    );
+                    self.send_selection_notify(req, property);
+                }
+            } else {
+                // Refuse — unsupported target
+                self.send_selection_notify(req, 0u32.into());
+            }
+        }
+
+        /// INCR send: stream large payloads in chunks to the requestor.
+        fn send_incr_to_requestor(&self, req: &SelectionRequestEvent, property: Atom, data: &[u8]) {
+            // Subscribe to PropertyNotify on requestor's window
+            let _ = self.conn.change_window_attributes(
+                req.requestor,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::PROPERTY_CHANGE),
+            );
+
+            // Set INCR type with total size as the initial property value
+            let size_bytes = (data.len() as u32).to_ne_bytes();
+            let _ = self.conn.change_property(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                req.requestor,
+                property,
+                self.incr_atom,
+                32,
+                1,
+                &size_bytes,
+            );
+            self.send_selection_notify(req, property);
+            let _ = self.conn.flush();
+
+            // Send chunks as requestor deletes property
+            let mut offset = 0;
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+
+            while offset < data.len() && std::time::Instant::now() < deadline {
+                match self.conn.poll_for_event() {
+                    Ok(Some(event)) => {
+                        let bytes = event.raw_bytes();
+                        // PropertyNotify = 28, state byte at offset 16, 1 = Deleted
+                        if bytes.len() >= 17 && (bytes[0] & 0x7f) == 28 && bytes[16] == 1 {
+                            let chunk_end = (offset + INCR_CHUNK_SIZE).min(data.len());
+                            let chunk = &data[offset..chunk_end];
+                            let _ = self.conn.change_property(
+                                x11rb::protocol::xproto::PropMode::REPLACE,
+                                req.requestor,
+                                property,
+                                self.utf8_string_atom,
+                                8,
+                                chunk.len() as u32,
+                                chunk,
+                            );
+                            let _ = self.conn.flush();
+                            offset = chunk_end;
+                        }
+                    }
+                    Ok(None) => thread::sleep(POLL_INTERVAL),
+                    Err(_) => break,
+                }
+            }
+
+            // Wait for final delete then send empty property to signal completion
+            let empty_deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < empty_deadline {
+                match self.conn.poll_for_event() {
+                    Ok(Some(event)) => {
+                        let bytes = event.raw_bytes();
+                        if bytes.len() >= 17 && (bytes[0] & 0x7f) == 28 && bytes[16] == 1 {
+                            let _ = self.conn.change_property(
+                                x11rb::protocol::xproto::PropMode::REPLACE,
+                                req.requestor,
+                                property,
+                                self.utf8_string_atom,
+                                8,
+                                0,
+                                &[],
+                            );
+                            let _ = self.conn.flush();
+                            break;
+                        }
+                    }
+                    Ok(None) => thread::sleep(POLL_INTERVAL),
+                    Err(_) => break,
+                }
+            }
+
+            // Unsubscribe from requestor's PropertyNotify
+            let _ = self.conn.change_window_attributes(
+                req.requestor,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::NO_EVENT),
+            );
+            let _ = self.conn.flush();
+        }
+
+        fn send_selection_notify(&self, req: &SelectionRequestEvent, property: Atom) {
+            let event = SelectionNotifyEvent {
+                response_type: SELECTION_NOTIFY_EVENT,
+                sequence: 0,
+                time: req.time,
+                requestor: req.requestor,
+                selection: req.selection,
+                target: req.target,
+                property,
+            };
+            let _ = self
+                .conn
+                .send_event(false, req.requestor, EventMask::NO_EVENT, event);
+            let _ = self.conn.flush();
         }
     }
 
@@ -387,24 +698,24 @@ mod real {
 
             self.self_serial += 1;
 
-            // Store the text for SelectionRequest handling
-            // In a full implementation, we'd spawn a thread to handle SelectionRequest events.
-            // For now, we set the property on our window so requestors can retrieve it.
-            self.conn
-                .change_property(
-                    x11rb::protocol::xproto::PropMode::REPLACE,
-                    self.owner_window,
-                    self.utf8_string_atom,
-                    self.utf8_string_atom,
-                    8,
-                    text.len() as u32,
-                    text.as_bytes(),
-                )
-                .map_err(|e| BackendError::Protocol(e.to_string()))?;
+            // Store data for SelectionRequest handling
+            self.pending_write = Some(text.as_bytes().to_vec());
 
-            self.conn
-                .flush()
-                .map_err(|e| BackendError::Protocol(e.to_string()))?;
+            // If a clipboard manager is present, ask it to persist our selection
+            if self.has_clipboard_manager && self.save_targets_atom != 0 {
+                let _ = self.conn.convert_selection(
+                    self.owner_window,
+                    self.clipboard_manager_atom,
+                    self.save_targets_atom,
+                    self.ccvv_prop_atom,
+                    x11rb::CURRENT_TIME,
+                );
+                let _ = self.conn.flush();
+            }
+
+            // Serve SelectionRequest events briefly so at least the clipboard
+            // manager (or the first consumer) can read our data.
+            self.serve_selection_requests(Duration::from_secs(2));
 
             Ok(WriteToken {
                 backend_serial: Some(self.self_serial),
