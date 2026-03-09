@@ -41,22 +41,16 @@ static GLOBAL_WINDOW: Mutex<AdaptiveTimingWindow> = Mutex::new(AdaptiveTimingWin
 });
 
 pub fn record_global_sample(interval_ms: u32) {
-    let Ok(mut window) = GLOBAL_WINDOW
+    let mut window = GLOBAL_WINDOW
         .lock()
-        .or_else(|error| Ok::<_, ()>(error.into_inner()))
-    else {
-        return;
-    };
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     window.record_sample(interval_ms);
 }
 
 pub fn global_threshold_ms() -> Option<u32> {
-    let Ok(window) = GLOBAL_WINDOW
+    let window = GLOBAL_WINDOW
         .lock()
-        .or_else(|error| Ok::<_, ()>(error.into_inner()))
-    else {
-        return None;
-    };
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     window.threshold_ms()
 }
 

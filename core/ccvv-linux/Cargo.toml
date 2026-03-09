@@ -6,6 +6,11 @@ license = "MIT"
 rust-version.workspace = true
 default-run = "ccvv-linux"
 
+[features]
+default = ["tray"]
+tray = ["dep:ksni"]
+xembed = []
+
 [[bin]]
 name = "ccvv-linux"
 path = "src/main.rs"
@@ -13,13 +18,17 @@ path = "src/main.rs"
 [[bin]]
 name = "ccvv-tray-sni"
 path = "src/bin/ccvv-tray-sni.rs"
+required-features = ["tray"]
 
 [[bin]]
 name = "ccvv-indicator-legacy"
 path = "src/bin/ccvv-indicator-legacy.rs"
+required-features = ["xembed"]
 
 [dependencies]
 ccvv-lib = { path = "../ccvv-lib" }
 clap.workspace = true
+ksni = { version = "0.3.3", default-features = false, features = ["blocking", "async-io"], optional = true }
+signal-hook = "0.3"
 sha2.workspace = true
 thiserror.workspace = true

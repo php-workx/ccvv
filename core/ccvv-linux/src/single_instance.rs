@@ -2,16 +2,28 @@
 
 use std::fs;
 use std::os::unix::net::UnixListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use crate::control::socket::{bind_socket, forward_command, RuntimeError};
 use crate::ui_protocol::ControlCommand;
 
+/// Removes the socket file on drop for clean shutdown.
+#[derive(Debug)]
+pub struct SocketCleanup {
+    path: PathBuf,
+}
+
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 #[derive(Debug)]
 pub enum InstanceGuard {
-    Primary(UnixListener),
+    Primary(UnixListener, SocketCleanup),
     Forwarded,
 }
 
@@ -27,20 +39,34 @@ pub fn acquire_single_instance(
     socket_path: &Path,
     command: ControlCommand,
 ) -> Result<InstanceGuard, SingleInstanceError> {
-    if socket_path.exists() {
-        match forward_command(socket_path, command) {
-            Ok(_) => return Ok(InstanceGuard::Forwarded),
-            Err(RuntimeError::Io(_)) => {
-                fs::remove_file(socket_path)?;
-            }
-            Err(RuntimeError::MissingAcknowledgement) => {
-                fs::remove_file(socket_path)?;
-            }
-            Err(error) => return Err(error.into()),
+    // Try bind first (eliminates TOCTOU race)
+    match bind_socket(socket_path) {
+        Ok(listener) => {
+            let cleanup = SocketCleanup {
+                path: socket_path.to_path_buf(),
+            };
+            return Ok(InstanceGuard::Primary(listener, cleanup));
         }
+        Err(RuntimeError::Io(ref error)) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            // Socket exists — try to forward
+        }
+        Err(error) => return Err(error.into()),
     }
 
-    Ok(InstanceGuard::Primary(bind_socket(socket_path)?))
+    // Socket exists — try to talk to the existing daemon
+    match forward_command(socket_path, command) {
+        Ok(_) => Ok(InstanceGuard::Forwarded),
+        Err(RuntimeError::Io(_)) | Err(RuntimeError::MissingAcknowledgement) => {
+            // Stale socket — remove and rebind
+            fs::remove_file(socket_path)?;
+            let listener = bind_socket(socket_path)?;
+            let cleanup = SocketCleanup {
+                path: socket_path.to_path_buf(),
+            };
+            Ok(InstanceGuard::Primary(listener, cleanup))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -76,7 +102,7 @@ mod tests {
 
         let guard = acquire_single_instance(&paths.socket_path, ControlCommand::GetStatus).unwrap();
 
-        assert!(matches!(guard, InstanceGuard::Primary(_)));
+        assert!(matches!(guard, InstanceGuard::Primary(_, _)));
     }
 
     #[test]
@@ -87,8 +113,8 @@ mod tests {
         fs::create_dir_all(&runtime_dir).unwrap();
 
         let guard = acquire_single_instance(&paths.socket_path, ControlCommand::GetStatus).unwrap();
-        let listener = match guard {
-            InstanceGuard::Primary(listener) => listener,
+        let (listener, _cleanup) = match guard {
+            InstanceGuard::Primary(listener, cleanup) => (listener, cleanup),
             InstanceGuard::Forwarded => panic!("first instance should bind"),
         };
 
@@ -120,7 +146,20 @@ mod tests {
 
         let guard = acquire_single_instance(&paths.socket_path, ControlCommand::GetStatus).unwrap();
 
-        assert!(matches!(guard, InstanceGuard::Primary(_)));
+        assert!(matches!(guard, InstanceGuard::Primary(_, _)));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_drop_removes_socket_file() {
+        let home_dir = temp_dir("home");
+        let runtime_dir = temp_dir("runtime");
+        let paths = RuntimePaths::from_roots(home_dir, runtime_dir, None);
+        fs::create_dir_all(paths.socket_path.parent().unwrap()).unwrap();
+
+        let guard = acquire_single_instance(&paths.socket_path, ControlCommand::GetStatus).unwrap();
+        assert!(paths.socket_path.exists());
+        drop(guard);
+        assert!(!paths.socket_path.exists());
     }
 }

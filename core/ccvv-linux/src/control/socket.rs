@@ -6,7 +6,13 @@ use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 use std::time::Duration;
+
+const MAX_COMMAND_BYTES: usize = 4096;
+const MAX_CONCURRENT_CLIENTS: usize = 16;
 
 use thiserror::Error;
 
@@ -87,8 +93,11 @@ pub fn bind_socket(path: &Path) -> Result<UnixListener, RuntimeError> {
 }
 
 pub fn read_command(stream: &mut UnixStream) -> Result<ControlCommand, RuntimeError> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buffer = String::new();
-    stream.read_to_string(&mut buffer)?;
+    stream
+        .take(MAX_COMMAND_BYTES as u64)
+        .read_to_string(&mut buffer)?;
     ControlCommand::decode_line(buffer.trim()).ok_or(RuntimeError::InvalidCommand)
 }
 
@@ -101,7 +110,7 @@ pub fn send_command(path: &Path, command: ControlCommand) -> Result<(), RuntimeE
 
 pub fn forward_command(path: &Path, command: ControlCommand) -> Result<String, RuntimeError> {
     let mut stream = UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.write_all(command.encode_line().as_bytes())?;
     stream.write_all(b"\n")?;
     stream.shutdown(Shutdown::Write)?;
@@ -117,6 +126,178 @@ pub fn forward_command(path: &Path, command: ControlCommand) -> Result<String, R
 
 pub fn status_line(snapshot: &StatusSnapshot) -> String {
     snapshot.encode_line()
+}
+
+#[derive(Clone, Debug)]
+pub struct DaemonState {
+    inner: Arc<DaemonStateInner>,
+}
+
+#[derive(Debug)]
+struct DaemonStateInner {
+    status: Mutex<StatusSnapshot>,
+    subscribers: Mutex<Vec<mpsc::Sender<StatusSnapshot>>>,
+    quitting: AtomicBool,
+    clean_requested: AtomicBool,
+}
+
+impl DaemonState {
+    pub fn new(status: StatusSnapshot) -> Self {
+        Self {
+            inner: Arc::new(DaemonStateInner {
+                status: Mutex::new(status),
+                subscribers: Mutex::new(Vec::new()),
+                quitting: AtomicBool::new(false),
+                clean_requested: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub fn snapshot(&self) -> StatusSnapshot {
+        self.inner
+            .status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn is_quitting(&self) -> bool {
+        self.inner.quitting.load(Ordering::SeqCst)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.inner
+            .status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .paused
+    }
+
+    pub fn set_last_clean_succeeded(&self, succeeded: bool) {
+        self.update_status(|status| status.last_clean_succeeded = succeeded);
+    }
+
+    fn subscribe(&self) -> mpsc::Receiver<StatusSnapshot> {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(self.snapshot()).ok();
+        self.inner
+            .subscribers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(sender);
+        receiver
+    }
+
+    fn update_status<F>(&self, update: F) -> StatusSnapshot
+    where
+        F: FnOnce(&mut StatusSnapshot),
+    {
+        let snapshot = {
+            let mut status = self
+                .inner
+                .status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            update(&mut status);
+            status.clone()
+        };
+        self.broadcast(snapshot.clone());
+        snapshot
+    }
+
+    pub fn request_quit(&self) {
+        self.inner.quitting.store(true, Ordering::SeqCst);
+    }
+
+    pub fn request_clean_now(&self) {
+        self.inner.clean_requested.store(true, Ordering::SeqCst);
+    }
+
+    pub fn take_clean_request(&self) -> bool {
+        self.inner.clean_requested.swap(false, Ordering::SeqCst)
+    }
+
+    fn broadcast(&self, snapshot: StatusSnapshot) {
+        let mut subscribers = self
+            .inner
+            .subscribers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        subscribers.retain(|sender| sender.send(snapshot.clone()).is_ok());
+    }
+}
+
+pub fn serve(listener: UnixListener, state: DaemonState) -> Result<(), RuntimeError> {
+    listener.set_nonblocking(true)?;
+    let active_clients = Arc::new(AtomicUsize::new(0));
+
+    while !state.is_quitting() {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if active_clients.load(Ordering::Relaxed) >= MAX_CONCURRENT_CLIENTS {
+                    drop(stream);
+                    continue;
+                }
+                let state = state.clone();
+                let active = active_clients.clone();
+                active.fetch_add(1, Ordering::Relaxed);
+                thread::spawn(move || {
+                    if let Err(error) = handle_client(stream, state) {
+                        eprintln!("ccvv-linux: client handler error: {error}");
+                    }
+                    active.fetch_sub(1, Ordering::Relaxed);
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(RuntimeError::Io(error)),
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_client(mut stream: UnixStream, state: DaemonState) -> Result<(), RuntimeError> {
+    match read_command(&mut stream)? {
+        ControlCommand::GetStatus => write_status(&mut stream, &state.snapshot())?,
+        ControlCommand::Pause => {
+            state.update_status(|status| status.paused = true);
+            write_ok(&mut stream)?;
+        }
+        ControlCommand::Resume => {
+            state.update_status(|status| status.paused = false);
+            write_ok(&mut stream)?;
+        }
+        ControlCommand::CleanNow => {
+            state.request_clean_now();
+            write_ok(&mut stream)?;
+        }
+        ControlCommand::Quit => {
+            state.request_quit();
+            write_ok(&mut stream)?;
+        }
+        ControlCommand::SubscribeStatus => {
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            let receiver = state.subscribe();
+            for snapshot in receiver {
+                write_status(&mut stream, &snapshot)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_ok(stream: &mut UnixStream) -> Result<(), RuntimeError> {
+    stream.write_all(b"ok\n")?;
+    Ok(())
+}
+
+fn write_status(stream: &mut UnixStream, snapshot: &StatusSnapshot) -> Result<(), RuntimeError> {
+    stream.write_all(status_line(snapshot).as_bytes())?;
+    stream.write_all(b"\n")?;
+    Ok(())
 }
 
 fn ensure_socket_parent(socket_path: &Path) -> Result<(), RuntimeError> {
@@ -151,17 +332,19 @@ fn ensure_file_mode(
     create_if_missing: bool,
     warnings: &mut Vec<String>,
 ) -> Result<(), RuntimeError> {
-    if !path.exists() {
-        if create_if_missing {
-            let file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(path)?;
-            file.set_permissions(fs::Permissions::from_mode(mode))?;
-        } else {
-            return Ok(());
+    if create_if_missing {
+        match OpenOptions::new().create_new(true).write(true).open(path) {
+            Ok(file) => {
+                file.set_permissions(fs::Permissions::from_mode(mode))?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // fall through to permission check
+            }
+            Err(error) => return Err(error.into()),
         }
+    } else if !path.exists() {
+        return Ok(());
     }
 
     let current_mode = fs::metadata(path)?.permissions().mode() & 0o777;
