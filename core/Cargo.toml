@@ -1,11 +1,12 @@
 [workspace]
-members = ["ccvv-lib", "ccvv-cli"]
+members = ["ccvv-lib", "ccvv-cli", "ccvv-linux"]
 resolver = "2"
 
 [workspace.package]
 rust-version = "1.82"
 
 [workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 regex = "1"

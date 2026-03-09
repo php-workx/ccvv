@@ -185,6 +185,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccvv-linux"
+version = "1.5.0"
+dependencies = [
+ "ccvv-lib",
+ "clap",
+ "thiserror",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

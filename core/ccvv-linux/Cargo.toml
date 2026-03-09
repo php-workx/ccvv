@@ -1,0 +1,24 @@
+[package]
+name = "ccvv-linux"
+version = "1.5.0"
+edition = "2021"
+license = "MIT"
+rust-version.workspace = true
+default-run = "ccvv-linux"
+
+[[bin]]
+name = "ccvv-linux"
+path = "src/main.rs"
+
+[[bin]]
+name = "ccvv-tray-sni"
+path = "src/bin/ccvv-tray-sni.rs"
+
+[[bin]]
+name = "ccvv-indicator-legacy"
+path = "src/bin/ccvv-indicator-legacy.rs"
+
+[dependencies]
+ccvv-lib = { path = "../ccvv-lib" }
+clap.workspace = true
+thiserror.workspace = true
