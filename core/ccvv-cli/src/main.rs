@@ -11,12 +11,9 @@ use similar::{ChangeTag, TextDiff};
 
 use ccvv_lib::config::{load_config, resolve_config, validate_config};
 use ccvv_lib::pipeline::Pipeline;
-use ccvv_lib::transforms::agent::AgentTransform;
-use ccvv_lib::transforms::autowrap::AutowrapTransform;
 use ccvv_lib::transforms::normalize::NormalizeTransform;
 use ccvv_lib::transforms::structural::StructuralTransform;
 use ccvv_lib::transforms::url::UrlTransform;
-use ccvv_lib::transforms::userrules::UserRulesTransform;
 use ccvv_lib::transforms::whitespace::WhitespaceTransform;
 use ccvv_lib::transforms::Transform;
 
@@ -394,7 +391,7 @@ fn build_pipeline(cli: &Cli) -> Pipeline {
     let stages = if selective {
         build_selective_stages(cli)
     } else {
-        build_full_stages(&resolved)
+        return Pipeline::from_resolved_config(&resolved);
     };
 
     Pipeline::new(stages)
@@ -415,41 +412,6 @@ fn build_selective_stages(cli: &Cli) -> Vec<Box<dyn Transform>> {
     }
     if cli.strip_urls {
         stages.push(Box::new(UrlTransform::new()));
-    }
-    stages
-}
-
-fn build_full_stages(resolved: &ccvv_lib::config::ResolvedConfig) -> Vec<Box<dyn Transform>> {
-    let mut stages: Vec<Box<dyn Transform>> = Vec::new();
-    if resolved.settings.normalize_unicode {
-        stages.push(Box::new(
-            NormalizeTransform::new().with_em_dash_replacement(&resolved.em_dash_replacement),
-        ));
-    }
-    if resolved.settings.whitespace_cleanup {
-        stages.push(Box::new(WhitespaceTransform::new()));
-    }
-    if resolved.settings.agent_strip {
-        stages.push(Box::new(AgentTransform::new()));
-    }
-    if resolved.settings.structural_detection {
-        stages.push(Box::new(StructuralTransform::new()));
-    }
-    if resolved.settings.url_cleaning {
-        stages.push(Box::new(
-            UrlTransform::new()
-                .with_strip_scheme(resolved.settings.url_strip_scheme)
-                .with_domain_overrides(resolved.url_domain_overrides.clone())
-                .with_extra_deny_params(resolved.url_global_deny.clone()),
-        ));
-    }
-    if resolved.settings.auto_wrapper {
-        stages.push(Box::new(AutowrapTransform::new()));
-    }
-    if resolved.settings.user_rules && !resolved.compiled_rules.is_empty() {
-        stages.push(Box::new(UserRulesTransform::with_rules(
-            resolved.compiled_rules.clone(),
-        )));
     }
     stages
 }

@@ -13,6 +13,7 @@ pub mod history;
 pub mod pipeline;
 pub mod secrets;
 pub mod table_extract;
+pub mod timing;
 pub mod transforms;
 
 // Re-export key types for convenience.
@@ -20,4 +21,5 @@ pub use config::{CcvvConfig, ResolvedConfig, Settings};
 pub use error::CcvvError;
 pub use pipeline::Pipeline;
 pub use secrets::SecretFilter;
+pub use timing::AdaptiveTimingWindow;
 pub use transforms::{ContentType, RuleFired, Transform, TransformContext};

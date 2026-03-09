@@ -5,7 +5,15 @@
 //! See §5.2 of the technical spec.
 
 use crate::classify::classify;
+use crate::config::ResolvedConfig;
 use crate::secrets::SecretFilter;
+use crate::transforms::agent::AgentTransform;
+use crate::transforms::autowrap::AutowrapTransform;
+use crate::transforms::normalize::NormalizeTransform;
+use crate::transforms::structural::StructuralTransform;
+use crate::transforms::url::UrlTransform;
+use crate::transforms::userrules::UserRulesTransform;
+use crate::transforms::whitespace::WhitespaceTransform;
 use crate::transforms::{Transform, TransformContext};
 
 /// Default maximum input size: 1 MB.
@@ -34,6 +42,46 @@ impl Pipeline {
             sensitive_filter: SecretFilter::new(),
             sensitive_filter_enabled: true,
         }
+    }
+
+    /// Build the canonical full pipeline from resolved config.
+    pub fn from_resolved_config(config: &ResolvedConfig) -> Self {
+        let mut stages: Vec<Box<dyn Transform>> = Vec::new();
+
+        if config.settings.normalize_unicode {
+            stages.push(Box::new(
+                NormalizeTransform::new().with_em_dash_replacement(&config.em_dash_replacement),
+            ));
+        }
+        if config.settings.whitespace_cleanup {
+            stages.push(Box::new(WhitespaceTransform::new()));
+        }
+        if config.settings.agent_strip {
+            stages.push(Box::new(AgentTransform::new()));
+        }
+        if config.settings.structural_detection {
+            stages.push(Box::new(StructuralTransform::new()));
+        }
+        if config.settings.url_cleaning {
+            stages.push(Box::new(
+                UrlTransform::new()
+                    .with_strip_scheme(config.settings.url_strip_scheme)
+                    .with_domain_overrides(config.url_domain_overrides.clone())
+                    .with_extra_deny_params(config.url_global_deny.clone()),
+            ));
+        }
+        if config.settings.auto_wrapper {
+            stages.push(Box::new(AutowrapTransform::new()));
+        }
+        if config.settings.user_rules && !config.compiled_rules.is_empty() {
+            stages.push(Box::new(UserRulesTransform::with_rules(
+                config.compiled_rules.clone(),
+            )));
+        }
+
+        Pipeline::new(stages)
+            .with_max_input_bytes(config.settings.max_input_bytes)
+            .with_sensitive_filter(config.settings.sensitive_filter)
     }
 
     /// Set the maximum input size in bytes.
@@ -269,5 +317,17 @@ mod tests {
         let pipeline = Pipeline::new(vec![]);
         let (_result, ctx) = pipeline.run("hello");
         assert_eq!(ctx.input_size_bytes, 5);
+    }
+
+    #[test]
+    fn test_from_resolved_config_respects_disabled_stages() {
+        let mut config = ResolvedConfig::default();
+        config.settings.normalize_unicode = false;
+        config.settings.whitespace_cleanup = false;
+
+        let pipeline = Pipeline::from_resolved_config(&config);
+        let (result, _ctx) = pipeline.run("hello");
+
+        assert_eq!(result, "hello");
     }
 }

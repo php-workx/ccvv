@@ -4,7 +4,7 @@
 //! cross-stage interactions, config resolution, FFI safety,
 //! and security invariants.
 
-use ccvv_lib::config::{resolve_config, validate_config, CcvvConfig};
+use ccvv_lib::config::{resolve_config, validate_config, CcvvConfig, ResolvedConfig};
 use ccvv_lib::pipeline::Pipeline;
 use ccvv_lib::secrets::SecretFilter;
 use ccvv_lib::transforms::agent::AgentTransform;
@@ -13,20 +13,11 @@ use ccvv_lib::transforms::structural::StructuralTransform;
 use ccvv_lib::transforms::url::UrlTransform;
 use ccvv_lib::transforms::userrules;
 use ccvv_lib::transforms::whitespace::WhitespaceTransform;
-use ccvv_lib::transforms::Transform;
+use ccvv_lib::Transform;
 
 /// Build a full default pipeline (all stages enabled, no user rules).
 fn default_pipeline() -> Pipeline {
-    let stages: Vec<Box<dyn Transform>> = vec![
-        Box::new(NormalizeTransform::new()),
-        Box::new(WhitespaceTransform::new()),
-        Box::new(AgentTransform::new()),
-        Box::new(StructuralTransform::new()),
-        Box::new(UrlTransform::new()),
-    ];
-    Pipeline::new(stages)
-        .with_max_input_bytes(1_048_576)
-        .with_sensitive_filter(true)
+    Pipeline::from_resolved_config(&ResolvedConfig::default())
 }
 
 // ===== Pipeline Idempotency =====

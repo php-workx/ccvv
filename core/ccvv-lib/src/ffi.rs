@@ -6,20 +6,12 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::Mutex;
 
 use crate::config::{load_config, resolve_config, ResolvedConfig};
 use crate::history::HistoryDb;
 use crate::pipeline::Pipeline;
 use crate::table_extract::extract_table;
-use crate::transforms::agent::AgentTransform;
-use crate::transforms::autowrap::AutowrapTransform;
-use crate::transforms::normalize::NormalizeTransform;
-use crate::transforms::structural::StructuralTransform;
-use crate::transforms::url::UrlTransform;
-use crate::transforms::userrules::UserRulesTransform;
-use crate::transforms::whitespace::WhitespaceTransform;
-use crate::transforms::Transform;
+use crate::timing::{global_threshold_ms, record_global_sample};
 
 /// Opaque handle to a loaded config.
 pub struct CcvvConfig {
@@ -719,46 +711,17 @@ pub unsafe extern "C" fn ccvv_history_free(history: *mut CcvvHistory) {
     }
 }
 
-// --- Timing functions (pre-mortem fix: WARN) ---
-
-/// Thread-safe timing state.
-static TIMING_SAMPLES: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-
 /// Record a timing sample (interval in ms between double-taps).
 #[no_mangle]
 pub extern "C" fn ccvv_timing_record_sample(interval_ms: u32) {
-    let Ok(mut samples) = TIMING_SAMPLES
-        .lock()
-        .or_else(|e| Ok::<_, ()>(e.into_inner()))
-    else {
-        return;
-    };
-    samples.push(interval_ms);
-    // Keep only last 100 samples
-    if samples.len() > 100 {
-        let excess = samples.len() - 100;
-        samples.drain(..excess);
-    }
+    record_global_sample(interval_ms);
 }
 
 /// Get the adaptive threshold in ms based on recorded samples.
 /// Returns 0 if not enough samples to compute (falls back to config).
 #[no_mangle]
 pub extern "C" fn ccvv_timing_get_threshold_ms() -> u32 {
-    let Ok(samples) = TIMING_SAMPLES
-        .lock()
-        .or_else(|e| Ok::<_, ()>(e.into_inner()))
-    else {
-        return 0;
-    };
-    if samples.len() < 10 {
-        return 0;
-    }
-    // Use 90th percentile of recorded intervals
-    let mut sorted: Vec<u32> = samples.clone();
-    sorted.sort();
-    let idx = (sorted.len() * 90) / 100;
-    sorted.get(idx).copied().unwrap_or(0)
+    global_threshold_ms().unwrap_or(0)
 }
 
 // --- Result builder helpers ---
@@ -833,57 +796,12 @@ fn build_hud_summary(rules: &[crate::transforms::RuleFired]) -> String {
 
 /// Build a pipeline with all stages enabled (default config).
 fn build_default_pipeline() -> Pipeline {
-    let stages: Vec<Box<dyn Transform>> = vec![
-        Box::new(NormalizeTransform::new()),
-        Box::new(WhitespaceTransform::new()),
-        Box::new(AgentTransform::new()),
-        Box::new(StructuralTransform::new()),
-        Box::new(UrlTransform::new()),
-        // AutowrapTransform disabled by default
-        // UserRulesTransform has no rules by default
-    ];
-    Pipeline::new(stages)
+    Pipeline::from_resolved_config(&ResolvedConfig::default())
 }
 
 /// Build a pipeline from resolved config.
 fn build_pipeline_from_config(config: &ResolvedConfig) -> Pipeline {
-    let mut stages: Vec<Box<dyn Transform>> = Vec::new();
-
-    if config.settings.normalize_unicode {
-        stages.push(Box::new(
-            NormalizeTransform::new().with_em_dash_replacement(&config.em_dash_replacement),
-        ));
-    }
-    if config.settings.whitespace_cleanup {
-        stages.push(Box::new(WhitespaceTransform::new()));
-    }
-    if config.settings.agent_strip {
-        stages.push(Box::new(AgentTransform::new()));
-    }
-    if config.settings.structural_detection {
-        stages.push(Box::new(StructuralTransform::new()));
-    }
-    if config.settings.url_cleaning {
-        let mut url_transform =
-            UrlTransform::new().with_strip_scheme(config.settings.url_strip_scheme);
-        if !config.url_domain_overrides.is_empty() {
-            url_transform =
-                url_transform.with_domain_overrides(config.url_domain_overrides.clone());
-        }
-        stages.push(Box::new(url_transform));
-    }
-    if config.settings.auto_wrapper {
-        stages.push(Box::new(AutowrapTransform::new()));
-    }
-    if config.settings.user_rules && !config.compiled_rules.is_empty() {
-        stages.push(Box::new(UserRulesTransform::with_rules(
-            config.compiled_rules.clone(),
-        )));
-    }
-
-    Pipeline::new(stages)
-        .with_max_input_bytes(config.settings.max_input_bytes)
-        .with_sensitive_filter(config.settings.sensitive_filter)
+    Pipeline::from_resolved_config(config)
 }
 
 #[cfg(test)]
