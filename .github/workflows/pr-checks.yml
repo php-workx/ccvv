@@ -65,6 +65,126 @@ jobs:
       - name: Run tests
         run: just test
 
+  linux-daemon:
+    name: Linux Daemon Feature Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Install Linux daemon dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxfixes-dev libwayland-dev xvfb
+      - name: Run Linux daemon tests with planned feature set
+        working-directory: core
+        run: cargo test -p ccvv-linux --features x11,wayland,tray,html-extract -- --nocapture
+
+  linux-x11-integration:
+    name: Linux X11 Integration
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Install X11 integration dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxfixes-dev libwayland-dev xvfb
+      - name: Run X11 integration tests under Xvfb
+        working-directory: core
+        run: xvfb-run -a cargo test -p ccvv-linux x11 -- --nocapture
+
+  linux-sidecars:
+    name: Linux Sidecar Builds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxfixes-dev libwayland-dev
+      - name: Check SNI tray sidecar build
+        working-directory: core
+        run: cargo check -p ccvv-linux --features tray
+      - name: Check legacy xembed sidecar build
+        working-directory: core
+        run: cargo check -p ccvv-linux --features xembed
+      - name: Build Linux release binaries
+        working-directory: core
+        run: cargo build -p ccvv-linux --release --bins --features tray
+
+  linux-gnome-limited:
+    name: Linux GNOME Limited Mode
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxfixes-dev libwayland-dev
+      - name: Run GNOME limited-mode tests
+        working-directory: core
+        run: cargo test -p ccvv-linux gnome -- --nocapture
+
+  # Linux stability gate: this headless wlroots run is required evidence before widening Linux rollout.
+  linux-wayland-harness:
+    name: Linux Stability Gate - Wayland Harness
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Wayland stability slice inside headless wlroots harness
+        run: |
+          linux/docker/wayland-harness/run.sh sh -lc '
+            cd /workspace/core
+            export CARGO_TARGET_DIR=/tmp/ccvv-target
+            export CARGO_HOME=/tmp/ccvv-cargo-home
+            cargo test --locked -p ccvv-linux wayland -- --nocapture
+          '
+
+  linux-packaging-assets:
+    name: Linux Packaging Assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate desktop entry
+        run: |
+          grep -q '^Type=Application$' linux/ccvv-linux.desktop
+          grep -q '^Exec=ccvv-linux$' linux/ccvv-linux.desktop
+          grep -q '^X-GNOME-Autostart-enabled=true$' linux/ccvv-linux.desktop
+          grep -q '^NoDisplay=true$' linux/ccvv-linux.desktop
+      - name: Validate systemd user service defaults
+        run: |
+          grep -q '^ExecStart=%h/.local/bin/ccvv-linux --backend auto$' linux/ccvv-linux.service
+          grep -q '^Restart=on-abnormal$' linux/ccvv-linux.service
+      - name: Validate packaging metadata exists
+        run: |
+          test -f linux/PKGBUILD
+          test -f linux/ccvv-linux.spec
+          test -f linux/ccvv-linux.control
+          grep -q '^pkgname=ccvv-linux$' linux/PKGBUILD
+          grep -q '^Name: ccvv-linux$' linux/ccvv-linux.spec
+          grep -q '^Package: ccvv-linux$' linux/ccvv-linux.control
+          grep -q 'ccvv-tray-sni' linux/PKGBUILD
+          grep -q 'ccvv-tray-sni' linux/ccvv-linux.spec
+          grep -q 'ccvv-tray-sni' linux/ccvv-linux.control
+
   deny:
     name: Cargo Deny
     runs-on: ubuntu-latest
@@ -82,7 +202,7 @@ jobs:
         run: cargo install --locked cargo-deny
       - name: Run cargo deny
         working-directory: core
-        run: cargo deny check
+        run: cargo deny check bans advisories licenses sources
 
   semgrep:
     name: Semgrep

@@ -148,6 +148,42 @@ Click the `[cc]` icon to:
 
 See `specs/` for the full [functional spec](specs/functional_v1.md) and [technical spec](specs/technical_v1.md).
 
+## Linux
+
+`ccvv-linux` is the native Linux daemon in `core/ccvv-linux`. It uses the same transform pipeline and local history store as the macOS app, but runtime behavior depends on the desktop session.
+
+Linux rollout status: `technical beta` for Linux power users.
+
+Broad external rollout stays blocked until the Linux stability gate is complete:
+
+1. Regression coverage for the high-risk copy/detect/format flows is in place.
+2. Linux CI is green, including the headless wlroots Wayland stability harness.
+3. The manual validation matrix is filled for X11, wlroots Wayland, and GNOME Wayland limited mode.
+4. A short internal soak completes without copy/content/formatting regressions.
+
+The current validation template lives in `docs/plans/2026-03-11-linux-stability-validation-matrix.md`.
+
+Linux runtime modes:
+
+1. `Automatic` - X11 and supported Wayland compositor clipboard-manager protocols. Clipboard changes are monitored automatically and `Clean Clipboard Now` is available.
+2. `Limited` - Wayland sessions without native automatic monitoring but with an explicit manual-clean path. Automatic cleaning is disabled.
+3. `DiagnosticsOnly` - no usable desktop clipboard backend. The daemon still exposes status and local control, but manual clean is unavailable.
+
+Linux limitations:
+
+1. GNOME/Mutter Wayland remains limited/manual rather than ordinary automatic double-copy mode.
+2. Sanitizing a mixed-content clipboard copy republishes text targets only.
+3. Tray sidecars are optional socket clients. The daemon keeps running without a tray host or without a sidecar.
+
+Linux packaging artifacts live under `linux/` and the Linux release tarball currently ships:
+
+1. `ccvv-linux`
+2. `ccvv-tray-sni`
+3. `ccvv-linux.desktop`
+4. `ccvv-linux.service`
+
+The legacy `ccvv-indicator-legacy` helper remains optional and is only built when `--features xembed` is enabled.
+
 ## License
 
 MIT

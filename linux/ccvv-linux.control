@@ -1,0 +1,10 @@
+Package: ccvv-linux
+Version: @@VERSION@@
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: ccvv maintainers <opensource@ccvv.invalid>
+Description: Clipboard sanitizer daemon for Linux desktops
+ ccvv-linux runs the ccvv clipboard sanitizer as a user-session daemon on
+ Linux desktops, ships the ccvv-tray-sni sidecar, and installs XDG autostart
+ plus optional systemd user assets.

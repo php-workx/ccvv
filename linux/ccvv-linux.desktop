@@ -2,10 +2,11 @@
 Type=Application
 Name=ccvv
 GenericName=Clipboard Sanitizer
-Comment=Clean clipboard text when you double-tap Ctrl+C
-Exec=ccvv-linux --backend auto
+Comment=Run the ccvv Linux clipboard sanitizer daemon
+Exec=ccvv-linux
 Terminal=false
 Categories=Utility;
 StartupNotify=false
+NoDisplay=true
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Phase=Applications

@@ -1,0 +1,17 @@
+pkgname=ccvv-linux
+pkgver=@@VERSION@@
+pkgrel=1
+pkgdesc="Clipboard sanitizer daemon for Linux desktops"
+arch=('x86_64')
+url="https://github.com/runger/ccvv"
+license=('MIT')
+depends=('glibc')
+source=("https://github.com/runger/ccvv/releases/download/v${pkgver}/ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  install -Dm755 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-linux" "$pkgdir/usr/bin/ccvv-linux"
+  install -Dm755 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-tray-sni" "$pkgdir/usr/bin/ccvv-tray-sni"
+  install -Dm644 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-linux.desktop" "$pkgdir/etc/xdg/autostart/ccvv.desktop"
+  install -Dm644 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-linux.service" "$pkgdir/usr/lib/systemd/user/ccvv.service"
+}

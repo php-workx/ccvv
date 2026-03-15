@@ -14,3 +14,4 @@ core/target/
 firebase-debug.log
 /.sonarqube/
 /.scannerwork/
+/.roam/

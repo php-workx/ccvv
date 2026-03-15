@@ -7,6 +7,16 @@ set -euo pipefail
 # Git hooks run in a minimal env — ensure Homebrew/Cargo are on PATH.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
 
+printf '=== pre-commit: actionlint ===\n'
+if [ -d .github/workflows ]; then
+  if ! command -v actionlint >/dev/null 2>&1; then
+    printf '%s\n' 'actionlint is required for pre-commit workflow validation.' >&2
+    printf '%s\n' 'Install it with: brew install actionlint' >&2
+    exit 1
+  fi
+  actionlint
+fi
+
 printf '=== pre-commit: fmt ===\n'
 cd core && cargo fmt --all -- --check
 
