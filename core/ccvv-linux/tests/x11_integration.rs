@@ -27,6 +27,23 @@ fn x11_backend_read_without_display_returns_error() {
 }
 
 #[test]
+fn x11_backend_write_without_display_returns_error() {
+    let mut backend = X11Backend::new();
+    let result = backend.write_plain_text("ccvv-x11-write-without-display");
+    assert!(result.is_err(), "expected write error without X11 display");
+}
+
+#[test]
+fn x11_backend_subscribe_without_display_returns_error() {
+    let mut backend = X11Backend::new();
+    let result = backend.subscribe();
+    assert!(
+        result.is_err(),
+        "expected subscribe error without X11 display"
+    );
+}
+
+#[test]
 #[ignore = "requires live X11 display with clipboard access"]
 fn x11_read_write_round_trip() {
     if !common::has_x11_display() {

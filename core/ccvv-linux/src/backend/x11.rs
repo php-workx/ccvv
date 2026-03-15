@@ -1,17 +1,17 @@
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "x11"))]
 mod real {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
     use x11rb::connection::Connection;
-    use x11rb::protocol::xfixes::{self, ConnectionExt as XFixesExt};
+    use x11rb::protocol::xfixes::{self, SelectionNotifyEvent as XfixesSelectionNotifyEvent};
     use x11rb::protocol::xproto::{
         Atom, AtomEnum, ConnectionExt, EventMask, Property, SelectionNotifyEvent,
         SelectionRequestEvent, Window, SELECTION_NOTIFY_EVENT,
     };
+    use x11rb::protocol::Event;
     use x11rb::rust_connection::RustConnection;
-    use x11rb::x11_utils::TryParse;
 
     use crate::backend::{
         BackendError, BackendStream, ClipboardBackend, ClipboardSnapshot, SelectionKind, WriteToken,
@@ -27,7 +27,6 @@ mod real {
     #[derive(Debug)]
     pub struct X11Backend {
         conn: RustConnection,
-        screen_num: usize,
         owner_window: Window,
         clipboard_atom: Atom,
         targets_atom: Atom,
@@ -108,8 +107,10 @@ mod real {
             }
 
             // Enable XFixes clipboard change notifications
-            let xfixes_version = xfixes::query_version(&conn, 5, 0);
-            if let Ok(reply) = xfixes_version.and_then(|cookie| cookie.reply()) {
+            if let Some(reply) = xfixes::query_version(&conn, 5, 0)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+            {
                 if reply.major_version >= 2 {
                     let _ = xfixes::select_selection_input(
                         &conn,
@@ -126,7 +127,6 @@ mod real {
 
             Self {
                 conn,
-                screen_num,
                 owner_window,
                 clipboard_atom,
                 targets_atom,
@@ -143,11 +143,10 @@ mod real {
 
         fn disconnected() -> Self {
             // Create a dummy connection that will fail on first use
-            let (conn, screen_num) =
+            let (conn, _screen_num) =
                 RustConnection::connect(None).expect("cannot create even dummy X11 connection");
             Self {
                 conn,
-                screen_num,
                 owner_window: 0,
                 clipboard_atom: 0,
                 targets_atom: 0,
@@ -199,16 +198,8 @@ mod real {
             while std::time::Instant::now() < deadline {
                 if let Ok(event) = self.conn.poll_for_event() {
                     if let Some(event) = event {
-                        let event_bytes = event.raw_bytes();
-                        if !event_bytes.is_empty()
-                            && (event_bytes[0] & 0x7f) == SELECTION_NOTIFY_EVENT
-                        {
-                            let notify: SelectionNotifyEvent =
-                                x11rb::x11_utils::TryParse::try_parse(event_bytes, &[])
-                                    .map(|(v, _)| v)
-                                    .map_err(|e| BackendError::Protocol(e.to_string()))?;
-
-                            if notify.property == 0u32.into() {
+                        if let Event::SelectionNotify(notify) = event {
+                            if u32::from(notify.property) == 0 {
                                 return Err(BackendError::Protocol(
                                     "selection conversion refused".into(),
                                 ));
@@ -266,9 +257,7 @@ mod real {
 
             while std::time::Instant::now() < incr_deadline {
                 if let Ok(Some(event)) = self.conn.poll_for_event() {
-                    let bytes = event.raw_bytes();
-                    // PropertyNotify = event type 28
-                    if !bytes.is_empty() && (bytes[0] & 0x7f) == 28 {
+                    if let Event::PropertyNotify(_) = event {
                         let prop = self
                             .conn
                             .get_property(
@@ -331,24 +320,14 @@ mod real {
 
             while std::time::Instant::now() < deadline {
                 match self.conn.poll_for_event() {
-                    Ok(Some(event)) => {
-                        let bytes = event.raw_bytes();
-                        if bytes.is_empty() {
-                            continue;
+                    Ok(Some(event)) => match event {
+                        Event::SelectionRequest(req) => {
+                            self.handle_selection_request(&req);
+                            served = true;
                         }
-                        let event_type = bytes[0] & 0x7f;
-                        // SelectionRequest = 30
-                        if event_type == 30 {
-                            if let Ok((req, _)) = SelectionRequestEvent::try_parse(bytes, &[]) {
-                                self.handle_selection_request(&req);
-                                served = true;
-                            }
-                        }
-                        // SelectionClear = 29 — we lost ownership
-                        if event_type == 29 {
-                            break;
-                        }
-                    }
+                        Event::SelectionClear(_) => break,
+                        _ => {}
+                    },
                     Ok(None) => {
                         if served {
                             break;
@@ -443,22 +422,22 @@ mod real {
             while offset < data.len() && std::time::Instant::now() < deadline {
                 match self.conn.poll_for_event() {
                     Ok(Some(event)) => {
-                        let bytes = event.raw_bytes();
-                        // PropertyNotify = 28, state byte at offset 16, 1 = Deleted
-                        if bytes.len() >= 17 && (bytes[0] & 0x7f) == 28 && bytes[16] == 1 {
-                            let chunk_end = (offset + INCR_CHUNK_SIZE).min(data.len());
-                            let chunk = &data[offset..chunk_end];
-                            let _ = self.conn.change_property(
-                                x11rb::protocol::xproto::PropMode::REPLACE,
-                                req.requestor,
-                                property,
-                                self.utf8_string_atom,
-                                8,
-                                chunk.len() as u32,
-                                chunk,
-                            );
-                            let _ = self.conn.flush();
-                            offset = chunk_end;
+                        if let Event::PropertyNotify(notify) = event {
+                            if notify.state == Property::DELETE {
+                                let chunk_end = (offset + INCR_CHUNK_SIZE).min(data.len());
+                                let chunk = &data[offset..chunk_end];
+                                let _ = self.conn.change_property(
+                                    x11rb::protocol::xproto::PropMode::REPLACE,
+                                    req.requestor,
+                                    property,
+                                    self.utf8_string_atom,
+                                    8,
+                                    chunk.len() as u32,
+                                    chunk,
+                                );
+                                let _ = self.conn.flush();
+                                offset = chunk_end;
+                            }
                         }
                     }
                     Ok(None) => thread::sleep(POLL_INTERVAL),
@@ -471,19 +450,20 @@ mod real {
             while std::time::Instant::now() < empty_deadline {
                 match self.conn.poll_for_event() {
                     Ok(Some(event)) => {
-                        let bytes = event.raw_bytes();
-                        if bytes.len() >= 17 && (bytes[0] & 0x7f) == 28 && bytes[16] == 1 {
-                            let _ = self.conn.change_property(
-                                x11rb::protocol::xproto::PropMode::REPLACE,
-                                req.requestor,
-                                property,
-                                self.utf8_string_atom,
-                                8,
-                                0,
-                                &[],
-                            );
-                            let _ = self.conn.flush();
-                            break;
+                        if let Event::PropertyNotify(notify) = event {
+                            if notify.state == Property::DELETE {
+                                let _ = self.conn.change_property(
+                                    x11rb::protocol::xproto::PropMode::REPLACE,
+                                    req.requestor,
+                                    property,
+                                    self.utf8_string_atom,
+                                    8,
+                                    0,
+                                    &[],
+                                );
+                                let _ = self.conn.flush();
+                                break;
+                            }
                         }
                     }
                     Ok(None) => thread::sleep(POLL_INTERVAL),
@@ -529,7 +509,6 @@ mod real {
 
             let (tx, rx) = mpsc::channel();
             let clipboard_atom = self.clipboard_atom;
-            let targets_atom = self.targets_atom;
             let utf8_string_atom = self.utf8_string_atom;
 
             // Connect a new X11 connection for the event loop
@@ -581,10 +560,10 @@ mod real {
                             Err(_) => break,
                         };
 
-                        // XFixes SelectionNotify has response_type = first_event + 0
-                        // We detect clipboard ownership changes
-                        let event_bytes = event.raw_bytes();
-                        if event_bytes.is_empty() {
+                        if !matches!(
+                            event,
+                            Event::XfixesSelectionNotify(XfixesSelectionNotifyEvent { .. })
+                        ) {
                             continue;
                         }
 
@@ -603,12 +582,12 @@ mod real {
                             std::time::Instant::now() + Duration::from_millis(500);
                         while std::time::Instant::now() < notify_deadline {
                             if let Ok(Some(inner)) = conn.poll_for_event() {
-                                let inner_bytes = inner.raw_bytes();
-                                if !inner_bytes.is_empty()
-                                    && (inner_bytes[0] & 0x7f) == SELECTION_NOTIFY_EVENT
-                                {
+                                if matches!(
+                                    inner,
+                                    Event::SelectionNotify(SelectionNotifyEvent { .. })
+                                ) {
                                     // Read the property
-                                    if let Ok(prop) = conn
+                                    if let Some(prop) = conn
                                         .get_property(
                                             true,
                                             watch_window,
@@ -617,7 +596,8 @@ mod real {
                                             0,
                                             1024 * 1024,
                                         )
-                                        .and_then(|c| c.reply())
+                                        .ok()
+                                        .and_then(|c| c.reply().ok())
                                     {
                                         let text =
                                             String::from_utf8_lossy(&prop.value).into_owned();
@@ -729,7 +709,7 @@ mod real {
 }
 
 // Non-Linux: use stub implementation
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(not(target_os = "linux"), not(feature = "x11")))]
 mod fallback {
     use crate::backend::stub::UnsupportedBackend;
     use crate::backend::{ClipboardBackend, ClipboardSnapshot, WriteToken};
@@ -780,10 +760,10 @@ mod fallback {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "x11"))]
 pub use real::X11Backend;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(not(target_os = "linux"), not(feature = "x11")))]
 pub use fallback::X11Backend;
 
 #[cfg(test)]
