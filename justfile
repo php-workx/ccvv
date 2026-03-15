@@ -256,13 +256,7 @@ dev-setup:
   printf 'For the full quality gate (incl. SonarQube): just sonar-setup && just check\n'
 
 # Common local preflight.
-dev: fmt lint test
-
-# Local quality gate (no SonarQube required) — used by pre-push hook.
-check-local: fmt lint semgrep shellcheck audit coverage
-
-# Full quality gate including SonarQube.
-check: check-local sonar
+dev: check-local
 
 # Full validation incl. coverage output.
 check-all: check coverage-html
