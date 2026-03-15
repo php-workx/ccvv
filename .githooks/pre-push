@@ -8,5 +8,7 @@ set -euo pipefail
 # Git hooks run in a minimal env — ensure Homebrew/Cargo are on PATH.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
 
-printf '=== pre-push: running local quality gate ===\n'
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
 just check-local
