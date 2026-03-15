@@ -4,8 +4,8 @@ use std::sync::mpsc;
 use std::thread;
 
 use ccvv_linux::tray::{
-    icon_for_status, request_status, send_menu_action, watch_status_updates, TrayAction, TrayError,
-    TrayIcon,
+    backend_label, icon_for_status, is_action_enabled, request_status, send_menu_action,
+    title_for_status, watch_status_updates, TrayAction, TrayError, TrayIcon,
 };
 use ccvv_linux::ui_protocol::StatusSnapshot;
 use clap::{Parser, Subcommand};
@@ -51,13 +51,7 @@ impl ksni::Tray for StatusNotifierTray {
     }
 
     fn title(&self) -> String {
-        let state = match icon_for_status(&self.status) {
-            TrayIcon::Active => "active",
-            TrayIcon::Paused => "paused",
-            TrayIcon::Limited => "limited",
-            TrayIcon::Error => "error",
-        };
-        format!("ccvv ({state})")
+        title_for_status(&self.status)
     }
 
     fn status(&self) -> ksni::Status {
@@ -82,7 +76,11 @@ impl ksni::Tray for StatusNotifierTray {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         vec![
-            standard_item("Clean Clipboard Now", Some(TrayAction::CleanNow), true),
+            standard_item(
+                "Clean Clipboard Now",
+                Some(TrayAction::CleanNow),
+                is_action_enabled(&self.status, TrayAction::CleanNow),
+            ),
             standard_item(
                 if self.status.paused {
                     "Resume"
@@ -94,10 +92,17 @@ impl ksni::Tray for StatusNotifierTray {
                 } else {
                     TrayAction::Pause
                 }),
-                true,
+                is_action_enabled(
+                    &self.status,
+                    if self.status.paused {
+                        TrayAction::Resume
+                    } else {
+                        TrayAction::Pause
+                    },
+                ),
             ),
             StandardItem {
-                label: format!("Backend: {:?}", self.status.backend),
+                label: format!("Backend: {}", backend_label(&self.status)),
                 enabled: false,
                 ..Default::default()
             }
@@ -141,11 +146,11 @@ fn main() -> ExitCode {
 fn run_command(socket_path: &Path, command: Command) -> ExitCode {
     let result = match command {
         Command::Status => request_status(socket_path).map(|status| {
-            println!("{:?}", icon_for_status(&status));
+            println!("{}", title_for_status(&status));
         }),
-        Command::Pause => send_menu_action(socket_path, TrayAction::Pause),
-        Command::Resume => send_menu_action(socket_path, TrayAction::Resume),
-        Command::CleanNow => send_menu_action(socket_path, TrayAction::CleanNow),
+        Command::Pause => guarded_action(socket_path, TrayAction::Pause),
+        Command::Resume => guarded_action(socket_path, TrayAction::Resume),
+        Command::CleanNow => guarded_action(socket_path, TrayAction::CleanNow),
         Command::Quit => send_menu_action(socket_path, TrayAction::Quit),
     };
 
@@ -156,6 +161,23 @@ fn run_command(socket_path: &Path, command: Command) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn guarded_action(socket_path: &Path, action: TrayAction) -> Result<(), TrayError> {
+    let status = request_status(socket_path)?;
+    if !is_action_enabled(&status, action) {
+        return Err(TrayError::Service(format!(
+            "{} is unavailable in the current backend mode",
+            match action {
+                TrayAction::Pause => "pause",
+                TrayAction::Resume => "resume",
+                TrayAction::CleanNow => "clean-now",
+                TrayAction::Quit => "quit",
+            }
+        )));
+    }
+
+    send_menu_action(socket_path, action)
 }
 
 fn run_tray(socket_path: PathBuf) -> Result<(), TrayError> {

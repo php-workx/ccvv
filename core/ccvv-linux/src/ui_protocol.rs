@@ -35,6 +35,7 @@ pub struct StatusSnapshot {
     pub backend: BackendMode,
     pub capability: BackendCapability,
     pub last_clean_succeeded: bool,
+    pub clean_now_available: bool,
 }
 
 impl StatusSnapshot {
@@ -44,7 +45,12 @@ impl StatusSnapshot {
             backend,
             capability,
             last_clean_succeeded: true,
+            clean_now_available: !matches!(capability, BackendCapability::DiagnosticsOnly),
         }
+    }
+
+    pub fn can_clean_now(&self) -> bool {
+        self.clean_now_available
     }
 }
 
@@ -116,11 +122,12 @@ impl BackendCapability {
 impl StatusSnapshot {
     pub fn encode_line(&self) -> String {
         format!(
-            "paused={};backend={};capability={};last_clean_succeeded={}",
+            "paused={};backend={};capability={};last_clean_succeeded={};clean_now_available={}",
             self.paused,
             self.backend.as_str(),
             self.capability.as_str(),
-            self.last_clean_succeeded
+            self.last_clean_succeeded,
+            self.clean_now_available
         )
     }
 
@@ -129,6 +136,7 @@ impl StatusSnapshot {
         let mut backend = None;
         let mut capability = None;
         let mut last_clean_succeeded = None;
+        let mut clean_now_available = None;
 
         for part in value.split(';') {
             let (key, value) = part.split_once('=')?;
@@ -137,15 +145,20 @@ impl StatusSnapshot {
                 "backend" => backend = BackendMode::parse(value),
                 "capability" => capability = BackendCapability::parse(value),
                 "last_clean_succeeded" => last_clean_succeeded = Some(matches!(value, "true")),
+                "clean_now_available" => clean_now_available = Some(matches!(value, "true")),
                 _ => {} // ignore unknown keys for forward compatibility
             }
         }
 
+        let capability = capability?;
+
         Some(Self {
             paused: paused?,
             backend: backend?,
-            capability: capability?,
+            capability,
             last_clean_succeeded: last_clean_succeeded?,
+            clean_now_available: clean_now_available
+                .unwrap_or(!matches!(capability, BackendCapability::DiagnosticsOnly)),
         })
     }
 }
@@ -171,6 +184,7 @@ mod tests {
             backend: BackendMode::None,
             capability: BackendCapability::DiagnosticsOnly,
             last_clean_succeeded: true,
+            clean_now_available: false,
         };
 
         let encoded = snapshot.encode_line();
@@ -185,11 +199,22 @@ mod tests {
             backend: BackendMode::Limited,
             capability: BackendCapability::Limited,
             last_clean_succeeded: false,
+            clean_now_available: false,
         };
 
         assert_eq!(
             StatusSnapshot::decode_line(&snapshot.encode_line()),
             Some(snapshot)
         );
+    }
+
+    #[test]
+    fn test_status_snapshot_decode_defaults_clean_now_for_older_payloads() {
+        let snapshot = StatusSnapshot::decode_line(
+            "paused=false;backend=Limited;capability=Limited;last_clean_succeeded=true",
+        )
+        .unwrap();
+
+        assert!(snapshot.clean_now_available);
     }
 }

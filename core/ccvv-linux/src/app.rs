@@ -12,9 +12,10 @@ use ccvv_lib::pipeline::Pipeline;
 use ccvv_lib::CcvvError;
 
 use crate::backend::none::NoneBackend;
-use crate::backend::wayland::WaylandBackend;
+use crate::backend::wayland::{WaylandBackend, WaylandSupport};
 use crate::backend::x11::X11Backend;
 use crate::backend::{BackendError, ClipboardBackend, ClipboardSnapshot};
+use crate::clipboard::gnome::{detect_limited_mode, LimitedMode};
 use crate::control::socket::{
     enforce_private_file_mode, prepare_runtime, serve, DaemonState, RuntimePaths,
 };
@@ -96,6 +97,18 @@ pub fn run(options: AppOptions) -> Result<(), AppError> {
     } = bootstrap;
 
     let backend = select_backend(&options);
+    let limited_mode = if matches!(backend, RuntimeBackend::Limited) {
+        Some(detect_limited_mode())
+    } else {
+        None
+    };
+
+    if let Some(limited_mode) = limited_mode {
+        eprintln!(
+            "ccvv-linux: limited mode active ({})",
+            limited_mode.description()
+        );
+    }
     let (listener, _socket_cleanup) = match singleton {
         InstanceGuard::Forwarded => {
             eprintln!("ccvv-linux: forwarded command to existing daemon");
@@ -108,7 +121,7 @@ pub fn run(options: AppOptions) -> Result<(), AppError> {
         eprintln!("ccvv-linux: warning: {warning}");
     }
 
-    let daemon_state = DaemonState::new(status_snapshot_for_backend(&backend));
+    let daemon_state = DaemonState::new(status_snapshot_for_backend(&backend, limited_mode));
 
     // Install signal handler for graceful shutdown
     let signal_quit = Arc::new(AtomicBool::new(false));
@@ -174,10 +187,17 @@ fn run_clipboard_loop(
     let pipeline = Pipeline::from_resolved_config(resolved);
     let store_raw_history = resolved.settings.history_store_raw;
     let poll_interval = Duration::from_millis(250);
-    let mut stream = backend.subscribe().ok();
-    if stream.is_none() {
-        eprintln!("ccvv-linux: backend subscription unavailable, using poll mode");
-    }
+    let capability = backend.capability();
+    let mut stream = if matches!(capability, BackendCapability::Automatic) {
+        let stream = backend.subscribe().ok();
+        if stream.is_none() {
+            eprintln!("ccvv-linux: backend subscription unavailable, using poll mode");
+        }
+        stream
+    } else {
+        eprintln!("ccvv-linux: automatic clipboard monitoring disabled in limited mode");
+        None
+    };
 
     loop {
         if let Ok(error) = runtime_errors.try_recv() {
@@ -203,6 +223,9 @@ fn run_clipboard_loop(
                     Err(error) => eprintln!("ccvv-linux: clean-now failed: {error}"),
                 }
             } else {
+                if matches!(capability, BackendCapability::Limited) {
+                    eprintln!("ccvv-linux: clean-now requested in limited mode, but native clipboard access is still unavailable");
+                }
                 state.set_last_clean_succeeded(false);
             }
         }
@@ -252,7 +275,7 @@ fn run_clipboard_loop(
             if should_close_stream {
                 stream = None;
             }
-        } else if !state.is_paused() {
+        } else if matches!(capability, BackendCapability::Automatic) && !state.is_paused() {
             if let Ok(snapshot) = backend.read_snapshot() {
                 if matches!(
                     detector.observe(&snapshot),
@@ -335,12 +358,15 @@ fn build_backend(backend: RuntimeBackend) -> Box<dyn ClipboardBackend> {
     }
 }
 
-fn status_snapshot_for_backend(backend: &RuntimeBackend) -> StatusSnapshot {
-    let (backend, capability) = match backend {
-        RuntimeBackend::None => (BackendMode::None, BackendCapability::DiagnosticsOnly),
-        RuntimeBackend::X11 => (BackendMode::X11, BackendCapability::Automatic),
-        RuntimeBackend::Wayland => (BackendMode::Wayland, BackendCapability::Automatic),
-        RuntimeBackend::Limited => (BackendMode::Limited, BackendCapability::Limited),
+fn status_snapshot_for_backend(
+    backend: &RuntimeBackend,
+    _limited_mode: Option<LimitedMode>,
+) -> StatusSnapshot {
+    let (backend, capability, clean_now_available) = match backend {
+        RuntimeBackend::None => (BackendMode::None, BackendCapability::DiagnosticsOnly, false),
+        RuntimeBackend::X11 => (BackendMode::X11, BackendCapability::Automatic, true),
+        RuntimeBackend::Wayland => (BackendMode::Wayland, BackendCapability::Automatic, true),
+        RuntimeBackend::Limited => (BackendMode::Limited, BackendCapability::Limited, true),
     };
 
     StatusSnapshot {
@@ -348,6 +374,7 @@ fn status_snapshot_for_backend(backend: &RuntimeBackend) -> StatusSnapshot {
         backend,
         capability,
         last_clean_succeeded: true,
+        clean_now_available,
     }
 }
 
@@ -370,12 +397,17 @@ fn select_backend(options: &AppOptions) -> RuntimeBackend {
     match options.backend {
         BackendOverride::None => RuntimeBackend::None,
         BackendOverride::Auto => {
-            if is_gnome_wayland_session() {
-                return RuntimeBackend::Limited;
-            }
-
             if is_wayland_session() {
-                return RuntimeBackend::Wayland;
+                return match WaylandBackend::probe_support() {
+                    WaylandSupport::Automatic { .. } => RuntimeBackend::Wayland,
+                    WaylandSupport::NoDataControl { .. }
+                        if WaylandBackend::limited_mode_available() =>
+                    {
+                        RuntimeBackend::Limited
+                    }
+                    WaylandSupport::NoDataControl { .. } => RuntimeBackend::None,
+                    WaylandSupport::Unavailable => RuntimeBackend::None,
+                };
             }
 
             if is_x11_session() {
@@ -405,6 +437,7 @@ fn is_x11_session() -> bool {
     std::env::var_os("DISPLAY").is_some()
 }
 
+#[cfg(test)]
 fn is_gnome_wayland_session() -> bool {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .unwrap_or_else(|_| String::new())
@@ -437,6 +470,7 @@ mod tests {
         RuntimeBackend,
     };
     use crate::backend::{ClipboardBackend, ClipboardSnapshot, SelectionKind, WriteToken};
+    use crate::clipboard::gnome::LimitedMode;
     use crate::control::socket::forward_command;
     use crate::control::socket::DaemonState;
     use crate::ui_protocol::{BackendCapability, BackendMode, ControlCommand, StatusSnapshot};
@@ -518,6 +552,7 @@ mod tests {
         let old_session_desktop = std::env::var_os("XDG_SESSION_DESKTOP");
         let old_gdmsession = std::env::var_os("GDMSESSION");
         let old_session_type = std::env::var_os("XDG_SESSION_TYPE");
+        let old_limited_tools = std::env::var_os("CCVV_WAYLAND_FORCE_LIMITED_TOOLS");
 
         std::env::set_var("WAYLAND_DISPLAY", ":0");
         std::env::set_var("DISPLAY", ":1");
@@ -525,36 +560,7 @@ mod tests {
         std::env::set_var("XDG_SESSION_DESKTOP", "KDE");
         std::env::remove_var("GDMSESSION");
         std::env::remove_var("XDG_SESSION_TYPE");
-
-        assert_eq!(
-            select_backend(&AppOptions {
-                backend: super::BackendOverride::Auto,
-                config_path: None,
-                profile: None,
-            }),
-            RuntimeBackend::Wayland
-        );
-
-        restore_env_var("WAYLAND_DISPLAY", old_wayland);
-        restore_env_var("DISPLAY", old_display);
-        restore_env_var("XDG_CURRENT_DESKTOP", old_current_desktop);
-        restore_env_var("XDG_SESSION_DESKTOP", old_session_desktop);
-        restore_env_var("GDMSESSION", old_gdmsession);
-        restore_env_var("XDG_SESSION_TYPE", old_session_type);
-    }
-
-    #[test]
-    fn test_select_backend_uses_limited_mode_for_gnome_wayland() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let old_wayland = std::env::var_os("WAYLAND_DISPLAY");
-        let old_display = std::env::var_os("DISPLAY");
-        let old_current_desktop = std::env::var_os("XDG_CURRENT_DESKTOP");
-        let old_session_desktop = std::env::var_os("XDG_SESSION_DESKTOP");
-        let old_gdmsession = std::env::var_os("GDMSESSION");
-        let old_session_type = std::env::var_os("XDG_SESSION_TYPE");
-
-        std::env::set_var("WAYLAND_DISPLAY", ":0");
-        std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
+        std::env::set_var("CCVV_WAYLAND_FORCE_LIMITED_TOOLS", "true");
 
         assert_eq!(
             select_backend(&AppOptions {
@@ -571,6 +577,65 @@ mod tests {
         restore_env_var("XDG_SESSION_DESKTOP", old_session_desktop);
         restore_env_var("GDMSESSION", old_gdmsession);
         restore_env_var("XDG_SESSION_TYPE", old_session_type);
+        restore_env_var("CCVV_WAYLAND_FORCE_LIMITED_TOOLS", old_limited_tools);
+    }
+
+    #[test]
+    fn test_select_backend_uses_limited_mode_for_gnome_wayland() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_wayland = std::env::var_os("WAYLAND_DISPLAY");
+        let old_display = std::env::var_os("DISPLAY");
+        let old_current_desktop = std::env::var_os("XDG_CURRENT_DESKTOP");
+        let old_session_desktop = std::env::var_os("XDG_SESSION_DESKTOP");
+        let old_gdmsession = std::env::var_os("GDMSESSION");
+        let old_session_type = std::env::var_os("XDG_SESSION_TYPE");
+        let old_limited_tools = std::env::var_os("CCVV_WAYLAND_FORCE_LIMITED_TOOLS");
+
+        std::env::set_var("WAYLAND_DISPLAY", ":0");
+        std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
+        std::env::set_var("CCVV_WAYLAND_FORCE_LIMITED_TOOLS", "true");
+
+        assert_eq!(
+            select_backend(&AppOptions {
+                backend: super::BackendOverride::Auto,
+                config_path: None,
+                profile: None,
+            }),
+            RuntimeBackend::Limited
+        );
+
+        restore_env_var("WAYLAND_DISPLAY", old_wayland);
+        restore_env_var("DISPLAY", old_display);
+        restore_env_var("XDG_CURRENT_DESKTOP", old_current_desktop);
+        restore_env_var("XDG_SESSION_DESKTOP", old_session_desktop);
+        restore_env_var("GDMSESSION", old_gdmsession);
+        restore_env_var("XDG_SESSION_TYPE", old_session_type);
+        restore_env_var("CCVV_WAYLAND_FORCE_LIMITED_TOOLS", old_limited_tools);
+    }
+
+    #[test]
+    fn test_select_backend_uses_none_for_wayland_without_automatic_or_manual_access() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_wayland = std::env::var_os("WAYLAND_DISPLAY");
+        let old_current_desktop = std::env::var_os("XDG_CURRENT_DESKTOP");
+        let old_limited_tools = std::env::var_os("CCVV_WAYLAND_FORCE_LIMITED_TOOLS");
+
+        std::env::set_var("WAYLAND_DISPLAY", ":0");
+        std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
+        std::env::set_var("CCVV_WAYLAND_FORCE_LIMITED_TOOLS", "false");
+
+        assert_eq!(
+            select_backend(&AppOptions {
+                backend: super::BackendOverride::Auto,
+                config_path: None,
+                profile: None,
+            }),
+            RuntimeBackend::None
+        );
+
+        restore_env_var("WAYLAND_DISPLAY", old_wayland);
+        restore_env_var("XDG_CURRENT_DESKTOP", old_current_desktop);
+        restore_env_var("CCVV_WAYLAND_FORCE_LIMITED_TOOLS", old_limited_tools);
     }
 
     #[test]
@@ -606,39 +671,53 @@ mod tests {
     #[test]
     fn test_status_snapshot_reflects_backend_selection() {
         assert_eq!(
-            status_snapshot_for_backend(&RuntimeBackend::X11),
+            status_snapshot_for_backend(&RuntimeBackend::X11, None),
             StatusSnapshot {
                 paused: false,
                 backend: BackendMode::X11,
                 capability: BackendCapability::Automatic,
                 last_clean_succeeded: true,
+                clean_now_available: true,
             }
         );
         assert_eq!(
-            status_snapshot_for_backend(&RuntimeBackend::Wayland),
+            status_snapshot_for_backend(&RuntimeBackend::Wayland, None),
             StatusSnapshot {
                 paused: false,
                 backend: BackendMode::Wayland,
                 capability: BackendCapability::Automatic,
                 last_clean_succeeded: true,
+                clean_now_available: true,
             }
         );
         assert_eq!(
-            status_snapshot_for_backend(&RuntimeBackend::Limited),
+            status_snapshot_for_backend(&RuntimeBackend::Limited, Some(LimitedMode::HotkeyOnly)),
             StatusSnapshot {
                 paused: false,
                 backend: BackendMode::Limited,
                 capability: BackendCapability::Limited,
                 last_clean_succeeded: true,
+                clean_now_available: true,
             }
         );
         assert_eq!(
-            status_snapshot_for_backend(&RuntimeBackend::None),
+            status_snapshot_for_backend(&RuntimeBackend::None, None),
             StatusSnapshot {
                 paused: false,
                 backend: BackendMode::None,
                 capability: BackendCapability::DiagnosticsOnly,
                 last_clean_succeeded: true,
+                clean_now_available: false,
+            }
+        );
+        assert_eq!(
+            status_snapshot_for_backend(&RuntimeBackend::Limited, Some(LimitedMode::CliOnly)),
+            StatusSnapshot {
+                paused: false,
+                backend: BackendMode::Limited,
+                capability: BackendCapability::Limited,
+                last_clean_succeeded: true,
+                clean_now_available: true,
             }
         );
     }
@@ -700,6 +779,7 @@ mod tests {
                 backend: BackendMode::None,
                 capability: BackendCapability::DiagnosticsOnly,
                 last_clean_succeeded: true,
+                clean_now_available: false,
             }
         );
 
@@ -755,10 +835,11 @@ mod tests {
         let socket_path = runtime_dir.join("ccvv.sock");
         wait_for_socket(&socket_path);
 
-        forward_command(&socket_path, ControlCommand::CleanNow).unwrap();
-        let observed =
-            wait_for_status_with_predicate(&socket_path, |snapshot| !snapshot.last_clean_succeeded);
-        assert!(!observed.last_clean_succeeded);
+        let response = forward_command(&socket_path, ControlCommand::CleanNow).unwrap();
+        let observed = wait_for_status(&socket_path);
+        assert_eq!(response.trim(), "error:clean-now-unavailable");
+        assert!(observed.last_clean_succeeded);
+        assert!(!observed.clean_now_available);
 
         forward_command(&socket_path, ControlCommand::Quit).unwrap();
         handle.join().unwrap().unwrap();
@@ -775,6 +856,7 @@ mod tests {
             backend: BackendMode::None,
             capability: BackendCapability::DiagnosticsOnly,
             last_clean_succeeded: true,
+            clean_now_available: false,
         });
 
         let resolved = ccvv_lib::config::ResolvedConfig::default();
@@ -864,6 +946,7 @@ mod tests {
         panic!("status request never succeeded: {last_error:?}");
     }
 
+    #[allow(dead_code)]
     fn wait_for_status_with_predicate(
         socket_path: &std::path::Path,
         predicate: impl Fn(StatusSnapshot) -> bool,

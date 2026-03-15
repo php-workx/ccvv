@@ -290,8 +290,12 @@ fn handle_client(mut stream: UnixStream, state: DaemonState) -> Result<(), Runti
             write_ok(&mut stream)?;
         }
         ControlCommand::CleanNow => {
-            state.request_clean_now();
-            write_ok(&mut stream)?;
+            if state.snapshot().can_clean_now() {
+                state.request_clean_now();
+                write_ok(&mut stream)?;
+            } else {
+                write_error(&mut stream, "clean-now-unavailable")?;
+            }
         }
         ControlCommand::Quit => {
             state.request_quit();
@@ -311,6 +315,13 @@ fn handle_client(mut stream: UnixStream, state: DaemonState) -> Result<(), Runti
 
 fn write_ok(stream: &mut UnixStream) -> Result<(), RuntimeError> {
     stream.write_all(b"ok\n")?;
+    Ok(())
+}
+
+fn write_error(stream: &mut UnixStream, error: &str) -> Result<(), RuntimeError> {
+    stream.write_all(b"error:")?;
+    stream.write_all(error.as_bytes())?;
+    stream.write_all(b"\n")?;
     Ok(())
 }
 
@@ -516,6 +527,34 @@ mod tests {
 
         assert!(matches!(error, RuntimeError::MissingAcknowledgement));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_clean_now_is_rejected_when_status_disables_it() {
+        let home_dir = temp_dir("home");
+        let runtime_dir = temp_dir("runtime");
+        let paths = RuntimePaths::from_roots(home_dir, runtime_dir, None);
+
+        prepare_runtime(&paths).unwrap();
+        let listener = bind_socket(&paths.socket_path).unwrap();
+        let socket_path = paths.socket_path.clone();
+        let state = DaemonState::new(StatusSnapshot {
+            paused: false,
+            backend: crate::ui_protocol::BackendMode::Limited,
+            capability: crate::ui_protocol::BackendCapability::Limited,
+            last_clean_succeeded: true,
+            clean_now_available: false,
+        });
+
+        let state_for_thread = state.clone();
+        let handle = thread::spawn(move || serve(listener, state_for_thread));
+
+        let response = forward_command(&socket_path, ControlCommand::CleanNow).unwrap();
+        state.request_quit();
+        handle.join().unwrap().unwrap();
+
+        assert_eq!(response.trim(), "error:clean-now-unavailable");
+        assert!(!state.take_clean_request());
     }
 
     #[test]

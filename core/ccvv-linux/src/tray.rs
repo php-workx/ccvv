@@ -37,12 +37,7 @@ pub fn freedesktop_icon_name(status: &StatusSnapshot) -> &'static str {
 }
 
 pub fn title_for_status(status: &StatusSnapshot) -> String {
-    let mode = match status.backend {
-        BackendMode::X11 => "X11",
-        BackendMode::Wayland => "Wayland",
-        BackendMode::Limited => "Limited",
-        BackendMode::None => "None",
-    };
+    let mode = backend_label(status);
 
     if status.paused {
         return format!("ccvv (paused, {mode})");
@@ -50,8 +45,35 @@ pub fn title_for_status(status: &StatusSnapshot) -> String {
     if !status.last_clean_succeeded {
         return format!("ccvv (error, {mode})");
     }
+    if !status.clean_now_available {
+        return format!("ccvv ({mode}, monitor only)");
+    }
 
     format!("ccvv ({mode})")
+}
+
+pub fn backend_label(status: &StatusSnapshot) -> String {
+    let mode = match status.backend {
+        BackendMode::X11 => "X11",
+        BackendMode::Wayland => "Wayland",
+        BackendMode::Limited => "Limited",
+        BackendMode::None => "None",
+    };
+
+    if status.clean_now_available {
+        mode.to_string()
+    } else {
+        format!("{mode} / no manual clean")
+    }
+}
+
+pub fn is_action_enabled(status: &StatusSnapshot, action: TrayAction) -> bool {
+    match action {
+        TrayAction::Pause => !status.paused,
+        TrayAction::Resume => status.paused,
+        TrayAction::CleanNow => status.clean_now_available,
+        TrayAction::Quit => true,
+    }
 }
 
 pub fn request_status(socket_path: &Path) -> Result<StatusSnapshot, TrayError> {
@@ -134,8 +156,8 @@ mod tests {
 
     use crate::control::socket::{bind_socket, prepare_runtime, RuntimePaths};
     use crate::tray::{
-        freedesktop_icon_name, icon_for_status, request_status, send_menu_action, title_for_status,
-        watch_status_updates, TrayAction, TrayIcon,
+        backend_label, freedesktop_icon_name, icon_for_status, is_action_enabled, request_status,
+        send_menu_action, title_for_status, watch_status_updates, TrayAction, TrayIcon,
     };
     use crate::ui_protocol::{BackendCapability, BackendMode, StatusSnapshot};
 
@@ -158,6 +180,7 @@ mod tests {
             backend: BackendMode::None,
             capability: BackendCapability::DiagnosticsOnly,
             last_clean_succeeded: true,
+            clean_now_available: false,
         };
 
         assert_eq!(icon_for_status(&status), TrayIcon::Paused);
@@ -170,10 +193,15 @@ mod tests {
             backend: BackendMode::Limited,
             capability: BackendCapability::Limited,
             last_clean_succeeded: false,
+            clean_now_available: false,
         };
 
         assert_eq!(freedesktop_icon_name(&status), "dialog-information");
-        assert_eq!(title_for_status(&status), "ccvv (error, Limited)");
+        assert_eq!(
+            title_for_status(&status),
+            "ccvv (error, Limited / no manual clean)"
+        );
+        assert_eq!(backend_label(&status), "Limited / no manual clean");
     }
 
     #[test]
@@ -237,12 +265,14 @@ mod tests {
                     backend: BackendMode::None,
                     capability: BackendCapability::DiagnosticsOnly,
                     last_clean_succeeded: true,
+                    clean_now_available: false,
                 },
                 StatusSnapshot {
                     paused: true,
                     backend: BackendMode::Limited,
                     capability: BackendCapability::Limited,
                     last_clean_succeeded: true,
+                    clean_now_available: true,
                 },
             ] {
                 stream.write_all(status.encode_line().as_bytes()).unwrap();
@@ -258,6 +288,21 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn test_clean_now_action_is_disabled_when_status_says_unavailable() {
+        let status = StatusSnapshot {
+            paused: false,
+            backend: BackendMode::Limited,
+            capability: BackendCapability::Limited,
+            last_clean_succeeded: true,
+            clean_now_available: false,
+        };
+
+        assert!(!is_action_enabled(&status, TrayAction::CleanNow));
+        assert!(is_action_enabled(&status, TrayAction::Pause));
+        assert!(!is_action_enabled(&status, TrayAction::Resume));
+    }
+
     fn spawn_status_server(listener: UnixListener) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -270,6 +315,7 @@ mod tests {
                 backend: BackendMode::None,
                 capability: BackendCapability::DiagnosticsOnly,
                 last_clean_succeeded: true,
+                clean_now_available: false,
             };
 
             stream.write_all(response.encode_line().as_bytes()).unwrap();
