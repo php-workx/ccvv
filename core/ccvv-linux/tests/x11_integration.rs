@@ -2,6 +2,7 @@ mod common;
 
 use ccvv_linux::backend::x11::X11Backend;
 use ccvv_linux::backend::ClipboardBackend;
+use std::time::Duration;
 
 #[test]
 fn x11_backend_source_name() {
@@ -55,6 +56,8 @@ fn x11_read_write_round_trip() {
         .write_plain_text(text)
         .expect("write should succeed on live X11");
     assert!(token.backend_serial.is_some());
+
+    std::thread::sleep(Duration::from_secs(3));
 
     let snapshot = backend
         .read_snapshot()

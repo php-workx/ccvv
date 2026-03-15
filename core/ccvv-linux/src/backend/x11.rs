@@ -1,6 +1,6 @@
 #[cfg(all(target_os = "linux", feature = "x11"))]
 mod real {
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -29,16 +29,12 @@ mod real {
         conn: RustConnection,
         owner_window: Window,
         clipboard_atom: Atom,
-        targets_atom: Atom,
         utf8_string_atom: Atom,
         ccvv_prop_atom: Atom,
         incr_atom: Atom,
-        clipboard_manager_atom: Atom,
-        save_targets_atom: Atom,
-        has_clipboard_manager: bool,
         self_serial: u64,
-        /// Data currently offered via the CLIPBOARD selection (set by write_plain_text).
-        pending_write: Option<Vec<u8>>,
+        self_write_text: Arc<Mutex<Option<String>>>,
+        owner: Option<X11SelectionOwnerHandle>,
     }
 
     impl X11Backend {
@@ -74,36 +70,12 @@ mod real {
             }
 
             let clipboard_atom = Self::intern_atom(&conn, b"CLIPBOARD");
-            let targets_atom = Self::intern_atom(&conn, b"TARGETS");
             let utf8_string_atom = Self::intern_atom(&conn, b"UTF8_STRING");
             let ccvv_prop_atom = Self::intern_atom(&conn, b"CCVV_SELECTION");
             let incr_atom = Self::intern_atom(&conn, b"INCR");
-            let clipboard_manager_atom = Self::intern_atom(&conn, b"CLIPBOARD_MANAGER");
-            let save_targets_atom = Self::intern_atom(&conn, b"SAVE_TARGETS");
 
-            if clipboard_atom == 0
-                || targets_atom == 0
-                || utf8_string_atom == 0
-                || ccvv_prop_atom == 0
-            {
+            if clipboard_atom == 0 || utf8_string_atom == 0 || ccvv_prop_atom == 0 {
                 return Self::disconnected();
-            }
-
-            // Check for clipboard manager presence
-            let has_clipboard_manager = if clipboard_manager_atom != 0 {
-                conn.get_selection_owner(clipboard_manager_atom)
-                    .ok()
-                    .and_then(|c| c.reply().ok())
-                    .map(|r| r.owner != 0)
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-
-            if has_clipboard_manager {
-                eprintln!("ccvv-linux: clipboard manager detected, durability enhanced");
-            } else {
-                eprintln!("ccvv-linux: no clipboard manager detected");
             }
 
             // Enable XFixes clipboard change notifications
@@ -129,15 +101,12 @@ mod real {
                 conn,
                 owner_window,
                 clipboard_atom,
-                targets_atom,
                 utf8_string_atom,
                 ccvv_prop_atom,
                 incr_atom,
-                clipboard_manager_atom,
-                save_targets_atom,
-                has_clipboard_manager,
                 self_serial: 0,
-                pending_write: None,
+                self_write_text: Arc::new(Mutex::new(None)),
+                owner: None,
             }
         }
 
@@ -149,15 +118,12 @@ mod real {
                 conn,
                 owner_window: 0,
                 clipboard_atom: 0,
-                targets_atom: 0,
                 utf8_string_atom: 0,
                 ccvv_prop_atom: 0,
                 incr_atom: 0,
-                clipboard_manager_atom: 0,
-                save_targets_atom: 0,
-                has_clipboard_manager: false,
                 self_serial: 0,
-                pending_write: None,
+                self_write_text: Arc::new(Mutex::new(None)),
+                owner: None,
             }
         }
 
@@ -301,6 +267,17 @@ mod real {
 
             Ok(String::from_utf8_lossy(&buffer).into_owned())
         }
+
+        fn ensure_selection_owner(&mut self) -> Result<&X11SelectionOwnerHandle, BackendError> {
+            if self.owner.is_none() {
+                self.owner = Some(X11SelectionOwnerHandle::start()?);
+            }
+
+            Ok(self
+                .owner
+                .as_ref()
+                .expect("x11 selection owner initialized"))
+        }
     }
 
     impl Default for X11Backend {
@@ -309,34 +286,202 @@ mod real {
         }
     }
 
-    // -- SelectionRequest handling (serves clipboard data to other X11 clients) --
+    #[derive(Debug)]
+    struct X11SelectionOwnerHandle {
+        commands: mpsc::Sender<OwnerCommand>,
+    }
 
-    impl X11Backend {
-        /// Process X11 events for a bounded duration, serving any SelectionRequest
-        /// that arrives so that other applications can read our clipboard content.
-        fn serve_selection_requests(&self, timeout: Duration) {
-            let deadline = std::time::Instant::now() + timeout;
-            let mut served = false;
+    #[derive(Debug)]
+    enum OwnerCommand {
+        Offer {
+            text: String,
+            response: mpsc::Sender<Result<(), BackendError>>,
+        },
+        Shutdown,
+    }
 
-            while std::time::Instant::now() < deadline {
+    #[derive(Debug)]
+    struct X11SelectionOwner {
+        conn: RustConnection,
+        owner_window: Window,
+        clipboard_atom: Atom,
+        targets_atom: Atom,
+        utf8_string_atom: Atom,
+        incr_atom: Atom,
+        clipboard_manager_atom: Atom,
+        save_targets_atom: Atom,
+        has_clipboard_manager: bool,
+        pending_write: Option<Vec<u8>>,
+    }
+
+    impl X11SelectionOwnerHandle {
+        fn start() -> Result<Self, BackendError> {
+            let (commands, receiver) = mpsc::channel();
+            thread::Builder::new()
+                .name("ccvv-x11-owner".into())
+                .spawn(move || {
+                    let mut owner = match X11SelectionOwner::new() {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            while let Ok(command) = receiver.recv() {
+                                match command {
+                                    OwnerCommand::Offer { response, .. } => {
+                                        let _ = response.send(Err(BackendError::Protocol(
+                                            format!("failed to start X11 selection owner: {error}"),
+                                        )));
+                                    }
+                                    OwnerCommand::Shutdown => break,
+                                }
+                            }
+                            return;
+                        }
+                    };
+
+                    owner.run(receiver);
+                })
+                .map_err(BackendError::Io)?;
+
+            Ok(Self { commands })
+        }
+
+        fn offer_text(&self, text: String) -> Result<(), BackendError> {
+            let (response_tx, response_rx) = mpsc::channel();
+            self.commands
+                .send(OwnerCommand::Offer {
+                    text,
+                    response: response_tx,
+                })
+                .map_err(|_| BackendError::SessionEnded)?;
+            response_rx.recv().map_err(|_| BackendError::SessionEnded)?
+        }
+    }
+
+    impl Drop for X11SelectionOwnerHandle {
+        fn drop(&mut self) {
+            let _ = self.commands.send(OwnerCommand::Shutdown);
+        }
+    }
+
+    impl X11SelectionOwner {
+        fn new() -> Result<Self, BackendError> {
+            let (conn, screen_num) =
+                RustConnection::connect(None).map_err(|e| BackendError::Protocol(e.to_string()))?;
+            let root = conn.setup().roots[screen_num].root;
+            let owner_window = conn
+                .generate_id()
+                .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+            conn.create_window(
+                0,
+                owner_window,
+                root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                x11rb::protocol::xproto::WindowClass::INPUT_ONLY,
+                0,
+                &Default::default(),
+            )
+            .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+            let clipboard_atom = X11Backend::intern_atom(&conn, b"CLIPBOARD");
+            let targets_atom = X11Backend::intern_atom(&conn, b"TARGETS");
+            let utf8_string_atom = X11Backend::intern_atom(&conn, b"UTF8_STRING");
+            let incr_atom = X11Backend::intern_atom(&conn, b"INCR");
+            let clipboard_manager_atom = X11Backend::intern_atom(&conn, b"CLIPBOARD_MANAGER");
+            let save_targets_atom = X11Backend::intern_atom(&conn, b"SAVE_TARGETS");
+
+            let has_clipboard_manager = if clipboard_manager_atom != 0 {
+                conn.get_selection_owner(clipboard_manager_atom)
+                    .ok()
+                    .and_then(|cookie| cookie.reply().ok())
+                    .map(|reply| reply.owner != 0)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            if has_clipboard_manager {
+                eprintln!("ccvv-linux: clipboard manager detected, durability enhanced");
+            } else {
+                eprintln!("ccvv-linux: no clipboard manager detected");
+            }
+
+            Ok(Self {
+                conn,
+                owner_window,
+                clipboard_atom,
+                targets_atom,
+                utf8_string_atom,
+                incr_atom,
+                clipboard_manager_atom,
+                save_targets_atom,
+                has_clipboard_manager,
+                pending_write: None,
+            })
+        }
+
+        fn run(&mut self, receiver: mpsc::Receiver<OwnerCommand>) {
+            loop {
+                while let Ok(command) = receiver.try_recv() {
+                    match command {
+                        OwnerCommand::Offer { text, response } => {
+                            let _ = response.send(self.offer_text(text));
+                        }
+                        OwnerCommand::Shutdown => return,
+                    }
+                }
+
                 match self.conn.poll_for_event() {
                     Ok(Some(event)) => match event {
-                        Event::SelectionRequest(req) => {
-                            self.handle_selection_request(&req);
-                            served = true;
+                        Event::SelectionRequest(req) => self.handle_selection_request(&req),
+                        Event::SelectionClear(_) => {
+                            self.pending_write = None;
                         }
-                        Event::SelectionClear(_) => break,
                         _ => {}
                     },
-                    Ok(None) => {
-                        if served {
-                            break;
-                        }
-                        thread::sleep(POLL_INTERVAL);
-                    }
-                    Err(_) => break,
+                    Ok(None) => thread::sleep(POLL_INTERVAL),
+                    Err(_) => return,
                 }
             }
+        }
+
+        fn offer_text(&mut self, text: String) -> Result<(), BackendError> {
+            self.pending_write = Some(text.into_bytes());
+            self.conn
+                .set_selection_owner(self.owner_window, self.clipboard_atom, x11rb::CURRENT_TIME)
+                .map_err(|e| BackendError::Protocol(e.to_string()))?;
+            self.conn
+                .flush()
+                .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+            let owner = self
+                .conn
+                .get_selection_owner(self.clipboard_atom)
+                .map_err(|e| BackendError::Protocol(e.to_string()))?
+                .reply()
+                .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+            if owner.owner != self.owner_window {
+                return Err(BackendError::Protocol(
+                    "failed to acquire clipboard ownership".into(),
+                ));
+            }
+
+            if self.has_clipboard_manager && self.save_targets_atom != 0 {
+                let _ = self.conn.convert_selection(
+                    self.owner_window,
+                    self.clipboard_manager_atom,
+                    self.save_targets_atom,
+                    self.targets_atom,
+                    x11rb::CURRENT_TIME,
+                );
+                let _ = self.conn.flush();
+            }
+
+            Ok(())
         }
 
         fn handle_selection_request(&self, req: &SelectionRequestEvent) {
@@ -497,6 +642,22 @@ mod real {
         }
     }
 
+    pub(super) fn take_self_write_flag(
+        self_write_text: &Arc<Mutex<Option<String>>>,
+        text: &str,
+    ) -> bool {
+        let mut pending = self_write_text
+            .lock()
+            .expect("x11 self-write state poisoned");
+        match pending.as_ref() {
+            Some(pending_text) if pending_text == text => {
+                pending.take();
+                true
+            }
+            _ => false,
+        }
+    }
+
     impl ClipboardBackend for X11Backend {
         fn capability(&self) -> BackendCapability {
             BackendCapability::Automatic
@@ -510,6 +671,7 @@ mod real {
             let (tx, rx) = mpsc::channel();
             let clipboard_atom = self.clipboard_atom;
             let utf8_string_atom = self.utf8_string_atom;
+            let self_write_text = self.self_write_text.clone();
 
             // Connect a new X11 connection for the event loop
             let (conn, screen_num) =
@@ -601,6 +763,8 @@ mod real {
                                     {
                                         let text =
                                             String::from_utf8_lossy(&prop.value).into_owned();
+                                        let is_self_write =
+                                            take_self_write_flag(&self_write_text, &text);
                                         let snapshot = ClipboardSnapshot {
                                             seat_id: "x11".to_string(),
                                             selection_kind: SelectionKind::Clipboard,
@@ -612,7 +776,7 @@ mod real {
                                                 .as_millis()
                                                 as u64,
                                             backend_serial: None,
-                                            is_self_write: false,
+                                            is_self_write,
                                         };
                                         if tx.send(Ok(snapshot)).is_err() {
                                             return;
@@ -632,6 +796,7 @@ mod real {
 
         fn read_snapshot(&mut self) -> Result<ClipboardSnapshot, BackendError> {
             let text = self.read_selection_text()?;
+            let is_self_write = take_self_write_flag(&self.self_write_text, &text);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -644,7 +809,7 @@ mod real {
                 acquired_html: None,
                 timestamp: now,
                 backend_serial: None,
-                is_self_write: false,
+                is_self_write,
             })
         }
 
@@ -653,49 +818,13 @@ mod real {
                 return Err(BackendError::Unavailable);
             }
 
-            // Take ownership of the CLIPBOARD selection
-            self.conn
-                .set_selection_owner(self.owner_window, self.clipboard_atom, x11rb::CURRENT_TIME)
-                .map_err(|e| BackendError::Protocol(e.to_string()))?;
-
-            self.conn
-                .flush()
-                .map_err(|e| BackendError::Protocol(e.to_string()))?;
-
-            // Verify we got ownership
-            let owner = self
-                .conn
-                .get_selection_owner(self.clipboard_atom)
-                .map_err(|e| BackendError::Protocol(e.to_string()))?
-                .reply()
-                .map_err(|e| BackendError::Protocol(e.to_string()))?;
-
-            if owner.owner != self.owner_window {
-                return Err(BackendError::Protocol(
-                    "failed to acquire clipboard ownership".into(),
-                ));
-            }
-
             self.self_serial += 1;
-
-            // Store data for SelectionRequest handling
-            self.pending_write = Some(text.as_bytes().to_vec());
-
-            // If a clipboard manager is present, ask it to persist our selection
-            if self.has_clipboard_manager && self.save_targets_atom != 0 {
-                let _ = self.conn.convert_selection(
-                    self.owner_window,
-                    self.clipboard_manager_atom,
-                    self.save_targets_atom,
-                    self.ccvv_prop_atom,
-                    x11rb::CURRENT_TIME,
-                );
-                let _ = self.conn.flush();
-            }
-
-            // Serve SelectionRequest events briefly so at least the clipboard
-            // manager (or the first consumer) can read our data.
-            self.serve_selection_requests(Duration::from_secs(2));
+            self.ensure_selection_owner()?
+                .offer_text(text.to_string())?;
+            *self
+                .self_write_text
+                .lock()
+                .expect("x11 self-write state poisoned") = Some(text.to_string());
 
             Ok(WriteToken {
                 backend_serial: Some(self.self_serial),
@@ -771,7 +900,6 @@ mod tests {
     use super::X11Backend;
     use crate::backend::BackendError;
     use crate::backend::ClipboardBackend;
-
     #[test]
     fn test_x11_backend_reports_unsupported_on_first_snapshot_read() {
         let mut backend = X11Backend::new();
@@ -782,5 +910,17 @@ mod tests {
             backend.read_snapshot().unwrap_err(),
             BackendError::Unavailable | BackendError::Protocol(_)
         ));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "x11"))]
+    #[test]
+    fn test_take_self_write_flag_consumes_matching_text_once() {
+        use std::sync::{Arc, Mutex};
+
+        let pending = Arc::new(Mutex::new(Some(String::from("hello"))));
+
+        assert!(super::real::take_self_write_flag(&pending, "hello"));
+        assert!(!super::real::take_self_write_flag(&pending, "hello"));
+        assert!(!super::real::take_self_write_flag(&pending, "world"));
     }
 }
