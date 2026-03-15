@@ -23,6 +23,18 @@ use crate::detection::{DetectionOutcome, DetectorState};
 use crate::single_instance::{acquire_single_instance, InstanceGuard};
 use crate::ui_protocol::{BackendCapability, BackendMode, ControlCommand, StatusSnapshot};
 
+enum StreamDisposition {
+    Keep,
+    Close,
+}
+
+struct LoopContext<'a> {
+    pipeline: &'a Pipeline,
+    history: &'a HistoryDb,
+    store_raw_history: bool,
+    state: &'a DaemonState,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BackendOverride {
@@ -185,122 +197,177 @@ fn run_clipboard_loop(
     let mut backend = build_backend(backend);
     let mut detector = DetectorState::new();
     let pipeline = Pipeline::from_resolved_config(resolved);
-    let store_raw_history = resolved.settings.history_store_raw;
     let poll_interval = Duration::from_millis(250);
     let capability = backend.capability();
-    let mut stream = if matches!(capability, BackendCapability::Automatic) {
-        let stream = backend.subscribe().ok();
-        if stream.is_none() {
-            eprintln!("ccvv-linux: backend subscription unavailable, using poll mode");
-        }
-        stream
-    } else {
-        eprintln!("ccvv-linux: automatic clipboard monitoring disabled in limited mode");
-        None
+    let loop_context = LoopContext {
+        pipeline: &pipeline,
+        history,
+        store_raw_history: resolved.settings.history_store_raw,
+        state: &state,
     };
+    let mut stream = initialize_stream(backend.as_mut(), capability);
 
     loop {
-        if let Ok(error) = runtime_errors.try_recv() {
+        if let Some(error) = take_runtime_error(runtime_errors) {
             return error;
         }
 
-        if state.is_quitting() || signal_quit.load(Ordering::Relaxed) {
+        if should_exit(&state, signal_quit) {
             state.request_quit();
             return Ok(());
         }
 
-        if state.take_clean_request() {
-            if let Ok(snapshot) = backend.read_snapshot() {
-                match handle_snapshot(
-                    &snapshot,
-                    &pipeline,
-                    history,
-                    backend.as_mut(),
-                    store_raw_history,
-                    &state,
-                ) {
-                    Ok(_) => {}
-                    Err(error) => eprintln!("ccvv-linux: clean-now failed: {error}"),
-                }
-            } else {
-                if matches!(capability, BackendCapability::Limited) {
-                    eprintln!("ccvv-linux: clean-now requested in limited mode, but native clipboard access is still unavailable");
-                }
-                state.set_last_clean_succeeded(false);
-            }
-        }
+        process_clean_request(backend.as_mut(), capability, &loop_context);
 
         if let Some(stream_rx) = stream.as_mut() {
-            let mut should_close_stream = false;
-
-            match stream_rx.recv_timeout(poll_interval) {
-                Ok(result) => {
-                    let snapshot = match result {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            if !matches!(error, BackendError::Unavailable) {
-                                eprintln!("ccvv-linux: stream backend error: {error}");
-                            }
-                            continue;
-                        }
-                    };
-
-                    if !state.is_paused()
-                        && matches!(
-                            detector.observe(&snapshot),
-                            DetectionOutcome::TriggeredClean
-                        )
-                    {
-                        match handle_snapshot(
-                            &snapshot,
-                            &pipeline,
-                            history,
-                            backend.as_mut(),
-                            store_raw_history,
-                            &state,
-                        ) {
-                            Ok(_) => {}
-                            Err(error) => {
-                                eprintln!("ccvv-linux: auto-clean failed: {error}");
-                            }
-                        }
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    should_close_stream = true;
-                }
-            };
-
-            if should_close_stream {
+            if matches!(
+                process_stream_event(
+                    stream_rx,
+                    &mut detector,
+                    backend.as_mut(),
+                    &loop_context,
+                    poll_interval,
+                ),
+                StreamDisposition::Close
+            ) {
                 stream = None;
             }
-        } else if matches!(capability, BackendCapability::Automatic) && !state.is_paused() {
-            if let Ok(snapshot) = backend.read_snapshot() {
-                if matches!(
-                    detector.observe(&snapshot),
-                    DetectionOutcome::TriggeredClean
-                ) {
-                    match handle_snapshot(
-                        &snapshot,
-                        &pipeline,
-                        history,
-                        backend.as_mut(),
-                        store_raw_history,
-                        &state,
-                    ) {
-                        Ok(_) => {}
-                        Err(error) => {
-                            eprintln!("ccvv-linux: auto-clean failed: {error}");
-                        }
-                    }
-                }
-            }
-
-            thread::sleep(poll_interval);
-        } else {
-            thread::sleep(poll_interval);
+            continue;
         }
+
+        process_polled_snapshot(
+            capability,
+            &mut detector,
+            backend.as_mut(),
+            &loop_context,
+            poll_interval,
+        );
+    }
+}
+
+fn initialize_stream(
+    backend: &mut dyn ClipboardBackend,
+    capability: BackendCapability,
+) -> Option<mpsc::Receiver<Result<ClipboardSnapshot, BackendError>>> {
+    if !matches!(capability, BackendCapability::Automatic) {
+        eprintln!("ccvv-linux: automatic clipboard monitoring disabled in limited mode");
+        return None;
+    }
+
+    let stream = backend.subscribe().ok();
+    if stream.is_none() {
+        eprintln!("ccvv-linux: backend subscription unavailable, using poll mode");
+    }
+    stream
+}
+
+fn take_runtime_error(
+    runtime_errors: &mpsc::Receiver<Result<(), AppError>>,
+) -> Option<Result<(), AppError>> {
+    runtime_errors.try_recv().ok()
+}
+
+fn should_exit(state: &DaemonState, signal_quit: &AtomicBool) -> bool {
+    state.is_quitting() || signal_quit.load(Ordering::Relaxed)
+}
+
+fn process_clean_request(
+    backend: &mut dyn ClipboardBackend,
+    capability: BackendCapability,
+    loop_context: &LoopContext<'_>,
+) {
+    if !loop_context.state.take_clean_request() {
+        return;
+    }
+
+    match backend.read_snapshot() {
+        Ok(snapshot) => run_clean(snapshot, backend, loop_context),
+        Err(_) => handle_clean_request_unavailable(capability, loop_context.state),
+    }
+}
+
+fn handle_clean_request_unavailable(capability: BackendCapability, state: &DaemonState) {
+    if matches!(capability, BackendCapability::Limited) {
+        eprintln!(
+            "ccvv-linux: clean-now requested in limited mode, but native clipboard access is still unavailable"
+        );
+    }
+    state.set_last_clean_succeeded(false);
+}
+
+fn process_stream_event(
+    stream_rx: &mpsc::Receiver<Result<ClipboardSnapshot, BackendError>>,
+    detector: &mut DetectorState,
+    backend: &mut dyn ClipboardBackend,
+    loop_context: &LoopContext<'_>,
+    poll_interval: Duration,
+) -> StreamDisposition {
+    match stream_rx.recv_timeout(poll_interval) {
+        Ok(Ok(snapshot)) => {
+            maybe_clean_snapshot(snapshot, detector, backend, loop_context);
+            StreamDisposition::Keep
+        }
+        Ok(Err(error)) => {
+            if !matches!(error, BackendError::Unavailable) {
+                eprintln!("ccvv-linux: stream backend error: {error}");
+            }
+            StreamDisposition::Keep
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => StreamDisposition::Keep,
+        Err(mpsc::RecvTimeoutError::Disconnected) => StreamDisposition::Close,
+    }
+}
+
+fn process_polled_snapshot(
+    capability: BackendCapability,
+    detector: &mut DetectorState,
+    backend: &mut dyn ClipboardBackend,
+    loop_context: &LoopContext<'_>,
+    poll_interval: Duration,
+) {
+    if matches!(capability, BackendCapability::Automatic) && !loop_context.state.is_paused() {
+        if let Ok(snapshot) = backend.read_snapshot() {
+            maybe_clean_snapshot(snapshot, detector, backend, loop_context);
+        }
+    }
+
+    thread::sleep(poll_interval);
+}
+
+fn maybe_clean_snapshot(
+    snapshot: ClipboardSnapshot,
+    detector: &mut DetectorState,
+    backend: &mut dyn ClipboardBackend,
+    loop_context: &LoopContext<'_>,
+) {
+    if loop_context.state.is_paused() {
+        return;
+    }
+
+    if !matches!(
+        detector.observe(&snapshot),
+        DetectionOutcome::TriggeredClean
+    ) {
+        return;
+    }
+
+    run_clean(snapshot, backend, loop_context);
+}
+
+fn run_clean(
+    snapshot: ClipboardSnapshot,
+    backend: &mut dyn ClipboardBackend,
+    loop_context: &LoopContext<'_>,
+) {
+    if let Err(error) = handle_snapshot(
+        &snapshot,
+        loop_context.pipeline,
+        loop_context.history,
+        backend,
+        loop_context.store_raw_history,
+        loop_context.state,
+    ) {
+        eprintln!("ccvv-linux: auto-clean failed: {error}");
     }
 }
 

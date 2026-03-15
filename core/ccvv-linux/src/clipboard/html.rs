@@ -56,6 +56,11 @@ pub fn extract_plain_text_from_html(html: &str) -> Result<String, HtmlExtractErr
     Ok(html_unescape(output.trim()).trim().to_string())
 }
 
+enum EntityDecode {
+    Decoded(char),
+    Literal(String),
+}
+
 fn push_space(output: &mut String) {
     if !output.ends_with([' ', '\n']) {
         output.push(' ');
@@ -78,58 +83,55 @@ fn html_unescape(input: &str) -> String {
             continue;
         }
 
-        // Collect entity up to ';'
-        let mut entity = String::new();
-        let mut found_semi = false;
-        for _ in 0..10 {
-            match chars.peek() {
-                Some(&';') => {
-                    chars.next();
-                    found_semi = true;
-                    break;
-                }
-                Some(_) => entity.push(chars.next().unwrap()),
-                None => break,
-            }
-        }
-
-        if !found_semi {
-            output.push('&');
-            output.push_str(&entity);
-            continue;
-        }
-
-        match entity.as_str() {
-            "nbsp" => output.push(' '),
-            "lt" => output.push('<'),
-            "gt" => output.push('>'),
-            "amp" => output.push('&'),
-            "quot" => output.push('"'),
-            "apos" => output.push('\''),
-            _ if entity.starts_with('#') => {
-                let code_point = if entity.starts_with("#x") || entity.starts_with("#X") {
-                    u32::from_str_radix(&entity[2..], 16).ok()
-                } else {
-                    entity[1..].parse::<u32>().ok()
-                };
-                match code_point.and_then(char::from_u32) {
-                    Some(decoded) => output.push(decoded),
-                    None => {
-                        output.push('&');
-                        output.push_str(&entity);
-                        output.push(';');
-                    }
-                }
-            }
-            _ => {
-                output.push('&');
-                output.push_str(&entity);
-                output.push(';');
-            }
+        match collect_entity(&mut chars) {
+            None => output.push('&'),
+            Some(entity) => match decode_entity(&entity) {
+                EntityDecode::Decoded(decoded) => output.push(decoded),
+                EntityDecode::Literal(literal) => output.push_str(&literal),
+            },
         }
     }
 
     output
+}
+
+fn collect_entity(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    let mut entity = String::new();
+    for _ in 0..10 {
+        match chars.peek() {
+            Some(&';') => {
+                chars.next();
+                return Some(entity);
+            }
+            Some(_) => entity.push(chars.next().expect("peeked entity character missing")),
+            None => return None,
+        }
+    }
+    None
+}
+
+fn decode_entity(entity: &str) -> EntityDecode {
+    match entity {
+        "nbsp" => EntityDecode::Decoded(' '),
+        "lt" => EntityDecode::Decoded('<'),
+        "gt" => EntityDecode::Decoded('>'),
+        "amp" => EntityDecode::Decoded('&'),
+        "quot" => EntityDecode::Decoded('"'),
+        "apos" => EntityDecode::Decoded('\''),
+        _ if entity.starts_with('#') => decode_numeric_entity(entity)
+            .map(EntityDecode::Decoded)
+            .unwrap_or_else(|| EntityDecode::Literal(format!("&{entity};"))),
+        _ => EntityDecode::Literal(format!("&{entity};")),
+    }
+}
+
+fn decode_numeric_entity(entity: &str) -> Option<char> {
+    let code_point = if entity.starts_with("#x") || entity.starts_with("#X") {
+        u32::from_str_radix(&entity[2..], 16).ok()
+    } else {
+        entity[1..].parse::<u32>().ok()
+    };
+    code_point.and_then(char::from_u32)
 }
 
 #[cfg(test)]

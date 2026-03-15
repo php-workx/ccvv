@@ -7,7 +7,7 @@ mod real {
     use x11rb::connection::Connection;
     use x11rb::protocol::xfixes::{self, SelectionNotifyEvent as XfixesSelectionNotifyEvent};
     use x11rb::protocol::xproto::{
-        Atom, AtomEnum, ConnectionExt, EventMask, Property, SelectionNotifyEvent,
+        Atom, AtomEnum, ConnectionExt, EventMask, GetPropertyReply, Property, SelectionNotifyEvent,
         SelectionRequestEvent, Window, SELECTION_NOTIFY_EVENT,
     };
     use x11rb::protocol::Event;
@@ -23,6 +23,11 @@ mod real {
     const INCR_THRESHOLD: usize = 256 * 1024; // 256 KiB
     const INCR_CHUNK_SIZE: usize = 64 * 1024; // 64 KiB per INCR chunk
     const INCR_MAX_SIZE: usize = 16 * 1024 * 1024; // 16 MiB cap
+
+    enum SelectionProperty {
+        Text(String),
+        Incremental,
+    }
 
     #[derive(Debug)]
     pub struct X11Backend {
@@ -144,7 +149,19 @@ mod real {
                 return Err(BackendError::Unavailable);
             }
 
-            // Request clipboard conversion to UTF8_STRING
+            self.request_selection_conversion()?;
+            let deadline = std::time::Instant::now() + SELECTION_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                if let Some(notify) = self.poll_selection_notify()? {
+                    return self.handle_selection_notify(notify);
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+
+            Err(BackendError::Protocol("selection timeout".into()))
+        }
+
+        fn request_selection_conversion(&self) -> Result<(), BackendError> {
             self.conn
                 .convert_selection(
                     self.owner_window,
@@ -154,66 +171,78 @@ mod real {
                     x11rb::CURRENT_TIME,
                 )
                 .map_err(|e| BackendError::Protocol(e.to_string()))?;
-
             self.conn
                 .flush()
+                .map_err(|e| BackendError::Protocol(e.to_string()))
+        }
+
+        fn poll_selection_notify(&self) -> Result<Option<SelectionNotifyEvent>, BackendError> {
+            let event = self
+                .conn
+                .poll_for_event()
                 .map_err(|e| BackendError::Protocol(e.to_string()))?;
+            Ok(match event {
+                Some(Event::SelectionNotify(notify)) => Some(notify),
+                _ => None,
+            })
+        }
 
-            // Wait for SelectionNotify
-            let deadline = std::time::Instant::now() + SELECTION_TIMEOUT;
-            while std::time::Instant::now() < deadline {
-                if let Ok(event) = self.conn.poll_for_event() {
-                    if let Some(event) = event {
-                        if let Event::SelectionNotify(notify) = event {
-                            if u32::from(notify.property) == 0 {
-                                return Err(BackendError::Protocol(
-                                    "selection conversion refused".into(),
-                                ));
-                            }
-
-                            // Read the property data (may be INCR)
-                            let prop = self
-                                .conn
-                                .get_property(
-                                    false, // don't delete yet
-                                    self.owner_window,
-                                    self.ccvv_prop_atom,
-                                    AtomEnum::ANY,
-                                    0,
-                                    1024 * 1024,
-                                )
-                                .map_err(|e| BackendError::Protocol(e.to_string()))?
-                                .reply()
-                                .map_err(|e| BackendError::Protocol(e.to_string()))?;
-
-                            // Check if this is an INCR transfer
-                            if self.incr_atom != 0 && prop.type_ == self.incr_atom {
-                                // INCR: delete property to signal readiness, then
-                                // accumulate chunks via PropertyNotify
-                                let _ = self
-                                    .conn
-                                    .delete_property(self.owner_window, self.ccvv_prop_atom);
-                                let _ = self.conn.change_window_attributes(
-                                    self.owner_window,
-                                    &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                                        .event_mask(EventMask::PROPERTY_CHANGE),
-                                );
-                                let _ = self.conn.flush();
-                                return self.receive_incr_chunks();
-                            }
-
-                            // Normal (non-INCR): delete property and return
-                            let _ = self
-                                .conn
-                                .delete_property(self.owner_window, self.ccvv_prop_atom);
-                            return Ok(String::from_utf8_lossy(&prop.value).into_owned());
-                        }
-                    }
-                }
-                thread::sleep(POLL_INTERVAL);
+        fn handle_selection_notify(
+            &self,
+            notify: SelectionNotifyEvent,
+        ) -> Result<String, BackendError> {
+            if u32::from(notify.property) == 0 {
+                return Err(BackendError::Protocol(
+                    "selection conversion refused".into(),
+                ));
             }
 
-            Err(BackendError::Protocol("selection timeout".into()))
+            match self.read_selection_property()? {
+                SelectionProperty::Text(text) => Ok(text),
+                SelectionProperty::Incremental => {
+                    self.prepare_for_incr_receive();
+                    self.receive_incr_chunks()
+                }
+            }
+        }
+
+        fn read_selection_property(&self) -> Result<SelectionProperty, BackendError> {
+            let prop = self.get_property_reply(false, self.owner_window, self.ccvv_prop_atom)?;
+            if self.incr_atom != 0 && prop.type_ == self.incr_atom {
+                let _ = self
+                    .conn
+                    .delete_property(self.owner_window, self.ccvv_prop_atom);
+                return Ok(SelectionProperty::Incremental);
+            }
+
+            let _ = self
+                .conn
+                .delete_property(self.owner_window, self.ccvv_prop_atom);
+            Ok(SelectionProperty::Text(
+                String::from_utf8_lossy(&prop.value).into_owned(),
+            ))
+        }
+
+        fn prepare_for_incr_receive(&self) {
+            let _ = self.conn.change_window_attributes(
+                self.owner_window,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::PROPERTY_CHANGE),
+            );
+            let _ = self.conn.flush();
+        }
+
+        fn get_property_reply(
+            &self,
+            delete: bool,
+            window: Window,
+            property: Atom,
+        ) -> Result<GetPropertyReply, BackendError> {
+            self.conn
+                .get_property(delete, window, property, AtomEnum::ANY, 0, 1024 * 1024)
+                .map_err(|e| BackendError::Protocol(e.to_string()))?
+                .reply()
+                .map_err(|e| BackendError::Protocol(e.to_string()))
         }
 
         /// Receive INCR transfer chunks by watching PropertyNotify events.
@@ -539,15 +568,23 @@ mod real {
 
         /// INCR send: stream large payloads in chunks to the requestor.
         fn send_incr_to_requestor(&self, req: &SelectionRequestEvent, property: Atom, data: &[u8]) {
-            // Subscribe to PropertyNotify on requestor's window
-            let _ = self.conn.change_window_attributes(
-                req.requestor,
-                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                    .event_mask(EventMask::PROPERTY_CHANGE),
-            );
+            self.set_requestor_event_mask(req.requestor, EventMask::PROPERTY_CHANGE);
+            self.initialize_incr_transfer(req, property, data.len());
+            self.send_selection_notify(req, property);
+            let _ = self.conn.flush();
+            self.stream_incr_chunks(req.requestor, property, data);
+            self.finish_incr_transfer(req.requestor, property);
+            self.set_requestor_event_mask(req.requestor, EventMask::NO_EVENT);
+            let _ = self.conn.flush();
+        }
 
-            // Set INCR type with total size as the initial property value
-            let size_bytes = (data.len() as u32).to_ne_bytes();
+        fn initialize_incr_transfer(
+            &self,
+            req: &SelectionRequestEvent,
+            property: Atom,
+            data_len: usize,
+        ) {
+            let size_bytes = (data_len as u32).to_ne_bytes();
             let _ = self.conn.change_property(
                 x11rb::protocol::xproto::PropMode::REPLACE,
                 req.requestor,
@@ -557,72 +594,62 @@ mod real {
                 1,
                 &size_bytes,
             );
-            self.send_selection_notify(req, property);
-            let _ = self.conn.flush();
+        }
 
-            // Send chunks as requestor deletes property
+        fn stream_incr_chunks(&self, requestor: Window, property: Atom, data: &[u8]) {
             let mut offset = 0;
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
 
             while offset < data.len() && std::time::Instant::now() < deadline {
+                if !self.wait_for_property_delete(deadline) {
+                    break;
+                }
+
+                let chunk_end = (offset + INCR_CHUNK_SIZE).min(data.len());
+                self.send_requestor_chunk(requestor, property, &data[offset..chunk_end]);
+                offset = chunk_end;
+            }
+        }
+
+        fn finish_incr_transfer(&self, requestor: Window, property: Atom) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            if self.wait_for_property_delete(deadline) {
+                self.send_requestor_chunk(requestor, property, &[]);
+            }
+        }
+
+        fn wait_for_property_delete(&self, deadline: std::time::Instant) -> bool {
+            while std::time::Instant::now() < deadline {
                 match self.conn.poll_for_event() {
-                    Ok(Some(event)) => {
-                        if let Event::PropertyNotify(notify) = event {
-                            if notify.state == Property::DELETE {
-                                let chunk_end = (offset + INCR_CHUNK_SIZE).min(data.len());
-                                let chunk = &data[offset..chunk_end];
-                                let _ = self.conn.change_property(
-                                    x11rb::protocol::xproto::PropMode::REPLACE,
-                                    req.requestor,
-                                    property,
-                                    self.utf8_string_atom,
-                                    8,
-                                    chunk.len() as u32,
-                                    chunk,
-                                );
-                                let _ = self.conn.flush();
-                                offset = chunk_end;
-                            }
-                        }
+                    Ok(Some(Event::PropertyNotify(notify))) if notify.state == Property::DELETE => {
+                        return true;
                     }
+                    Ok(Some(_)) => {}
                     Ok(None) => thread::sleep(POLL_INTERVAL),
-                    Err(_) => break,
+                    Err(_) => return false,
                 }
             }
+            false
+        }
 
-            // Wait for final delete then send empty property to signal completion
-            let empty_deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while std::time::Instant::now() < empty_deadline {
-                match self.conn.poll_for_event() {
-                    Ok(Some(event)) => {
-                        if let Event::PropertyNotify(notify) = event {
-                            if notify.state == Property::DELETE {
-                                let _ = self.conn.change_property(
-                                    x11rb::protocol::xproto::PropMode::REPLACE,
-                                    req.requestor,
-                                    property,
-                                    self.utf8_string_atom,
-                                    8,
-                                    0,
-                                    &[],
-                                );
-                                let _ = self.conn.flush();
-                                break;
-                            }
-                        }
-                    }
-                    Ok(None) => thread::sleep(POLL_INTERVAL),
-                    Err(_) => break,
-                }
-            }
-
-            // Unsubscribe from requestor's PropertyNotify
-            let _ = self.conn.change_window_attributes(
-                req.requestor,
-                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                    .event_mask(EventMask::NO_EVENT),
+        fn send_requestor_chunk(&self, requestor: Window, property: Atom, chunk: &[u8]) {
+            let _ = self.conn.change_property(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                requestor,
+                property,
+                self.utf8_string_atom,
+                8,
+                chunk.len() as u32,
+                chunk,
             );
             let _ = self.conn.flush();
+        }
+
+        fn set_requestor_event_mask(&self, requestor: Window, event_mask: EventMask) {
+            let _ = self.conn.change_window_attributes(
+                requestor,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().event_mask(event_mask),
+            );
         }
 
         fn send_selection_notify(&self, req: &SelectionRequestEvent, property: Atom) {
@@ -669,127 +696,25 @@ mod real {
             }
 
             let (tx, rx) = mpsc::channel();
+            let self_write_text = self.self_write_text.clone();
+            let (conn, watch_window, ccvv_prop) = self.create_watch_connection()?;
             let clipboard_atom = self.clipboard_atom;
             let utf8_string_atom = self.utf8_string_atom;
-            let self_write_text = self.self_write_text.clone();
-
-            // Connect a new X11 connection for the event loop
-            let (conn, screen_num) =
-                RustConnection::connect(None).map_err(|e| BackendError::Protocol(e.to_string()))?;
-
-            let root = conn.setup().roots[screen_num].root;
-            let watch_window = conn
-                .generate_id()
-                .map_err(|e| BackendError::Protocol(e.to_string()))?;
-
-            conn.create_window(
-                0,
-                watch_window,
-                root,
-                0,
-                0,
-                1,
-                1,
-                0,
-                x11rb::protocol::xproto::WindowClass::INPUT_ONLY,
-                0,
-                &Default::default(),
-            )
-            .map_err(|e| BackendError::Protocol(e.to_string()))?;
-
-            // Subscribe to XFixes events on this new connection
-            let _ = xfixes::query_version(&conn, 5, 0)
-                .ok()
-                .and_then(|c| c.reply().ok());
-            let _ = xfixes::select_selection_input(
-                &conn,
-                watch_window,
-                clipboard_atom,
-                xfixes::SelectionEventMask::SET_SELECTION_OWNER
-                    | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
-                    | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE,
-            );
-            let _ = conn.flush();
-
-            let ccvv_prop = Self::intern_atom(&conn, b"CCVV_WATCH_PROP");
 
             thread::Builder::new()
                 .name("ccvv-x11-events".into())
                 .spawn(move || {
-                    loop {
-                        let event = match conn.wait_for_event() {
-                            Ok(e) => e,
-                            Err(_) => break,
-                        };
-
-                        if !matches!(
-                            event,
-                            Event::XfixesSelectionNotify(XfixesSelectionNotifyEvent { .. })
-                        ) {
-                            continue;
-                        }
-
-                        // Try to read the clipboard content
-                        let _ = conn.convert_selection(
-                            watch_window,
-                            clipboard_atom,
-                            utf8_string_atom,
-                            ccvv_prop,
-                            x11rb::CURRENT_TIME,
-                        );
-                        let _ = conn.flush();
-
-                        // Wait for SelectionNotify with a timeout
-                        let notify_deadline =
-                            std::time::Instant::now() + Duration::from_millis(500);
-                        while std::time::Instant::now() < notify_deadline {
-                            if let Ok(Some(inner)) = conn.poll_for_event() {
-                                if matches!(
-                                    inner,
-                                    Event::SelectionNotify(SelectionNotifyEvent { .. })
-                                ) {
-                                    // Read the property
-                                    if let Some(prop) = conn
-                                        .get_property(
-                                            true,
-                                            watch_window,
-                                            ccvv_prop,
-                                            AtomEnum::ANY,
-                                            0,
-                                            1024 * 1024,
-                                        )
-                                        .ok()
-                                        .and_then(|c| c.reply().ok())
-                                    {
-                                        let text =
-                                            String::from_utf8_lossy(&prop.value).into_owned();
-                                        let is_self_write =
-                                            take_self_write_flag(&self_write_text, &text);
-                                        let snapshot = ClipboardSnapshot {
-                                            seat_id: "x11".to_string(),
-                                            selection_kind: SelectionKind::Clipboard,
-                                            acquired_plain_text: text,
-                                            acquired_html: None,
-                                            timestamp: std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap_or_default()
-                                                .as_millis()
-                                                as u64,
-                                            backend_serial: None,
-                                            is_self_write,
-                                        };
-                                        if tx.send(Ok(snapshot)).is_err() {
-                                            return;
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                    }
+                    Self::run_watch_loop(
+                        conn,
+                        watch_window,
+                        clipboard_atom,
+                        utf8_string_atom,
+                        ccvv_prop,
+                        self_write_text,
+                        tx,
+                    );
                 })
-                .map_err(|e| BackendError::Io(e))?;
+                .map_err(BackendError::Io)?;
 
             Ok(rx)
         }
@@ -834,6 +759,164 @@ mod real {
         fn source_name(&self) -> &'static str {
             "x11"
         }
+    }
+
+    impl X11Backend {
+        fn create_watch_connection(&self) -> Result<(RustConnection, Window, Atom), BackendError> {
+            let (conn, screen_num) =
+                RustConnection::connect(None).map_err(|e| BackendError::Protocol(e.to_string()))?;
+            let root = conn.setup().roots[screen_num].root;
+            let watch_window = conn
+                .generate_id()
+                .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+            conn.create_window(
+                0,
+                watch_window,
+                root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                x11rb::protocol::xproto::WindowClass::INPUT_ONLY,
+                0,
+                &Default::default(),
+            )
+            .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+            let _ = xfixes::query_version(&conn, 5, 0)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok());
+            let _ = xfixes::select_selection_input(
+                &conn,
+                watch_window,
+                self.clipboard_atom,
+                xfixes::SelectionEventMask::SET_SELECTION_OWNER
+                    | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
+                    | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE,
+            );
+            let _ = conn.flush();
+
+            Ok((
+                conn,
+                watch_window,
+                Self::intern_atom(&conn, b"CCVV_WATCH_PROP"),
+            ))
+        }
+
+        fn run_watch_loop(
+            conn: RustConnection,
+            watch_window: Window,
+            clipboard_atom: Atom,
+            utf8_string_atom: Atom,
+            ccvv_prop: Atom,
+            self_write_text: Arc<Mutex<Option<String>>>,
+            tx: mpsc::Sender<Result<ClipboardSnapshot, BackendError>>,
+        ) {
+            loop {
+                let event = match conn.wait_for_event() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                };
+                if !matches!(
+                    event,
+                    Event::XfixesSelectionNotify(XfixesSelectionNotifyEvent { .. })
+                ) {
+                    continue;
+                }
+
+                Self::request_watch_selection(
+                    &conn,
+                    watch_window,
+                    clipboard_atom,
+                    utf8_string_atom,
+                    ccvv_prop,
+                );
+
+                let Some(snapshot) =
+                    Self::read_watch_snapshot(&conn, watch_window, ccvv_prop, &self_write_text)
+                else {
+                    continue;
+                };
+
+                if tx.send(Ok(snapshot)).is_err() {
+                    return;
+                }
+            }
+        }
+
+        fn request_watch_selection(
+            conn: &RustConnection,
+            watch_window: Window,
+            clipboard_atom: Atom,
+            utf8_string_atom: Atom,
+            ccvv_prop: Atom,
+        ) {
+            let _ = conn.convert_selection(
+                watch_window,
+                clipboard_atom,
+                utf8_string_atom,
+                ccvv_prop,
+                x11rb::CURRENT_TIME,
+            );
+            let _ = conn.flush();
+        }
+
+        fn read_watch_snapshot(
+            conn: &RustConnection,
+            watch_window: Window,
+            ccvv_prop: Atom,
+            self_write_text: &Arc<Mutex<Option<String>>>,
+        ) -> Option<ClipboardSnapshot> {
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                let event = conn.poll_for_event().ok()?;
+                match event {
+                    Some(Event::SelectionNotify(SelectionNotifyEvent { .. })) => {
+                        return Self::build_watch_snapshot(
+                            conn,
+                            watch_window,
+                            ccvv_prop,
+                            self_write_text,
+                        );
+                    }
+                    Some(_) => {}
+                    None => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            None
+        }
+
+        fn build_watch_snapshot(
+            conn: &RustConnection,
+            watch_window: Window,
+            ccvv_prop: Atom,
+            self_write_text: &Arc<Mutex<Option<String>>>,
+        ) -> Option<ClipboardSnapshot> {
+            let prop = conn
+                .get_property(true, watch_window, ccvv_prop, AtomEnum::ANY, 0, 1024 * 1024)
+                .ok()?
+                .reply()
+                .ok()?;
+            let text = String::from_utf8_lossy(&prop.value).into_owned();
+            Some(ClipboardSnapshot {
+                seat_id: "x11".to_string(),
+                selection_kind: SelectionKind::Clipboard,
+                acquired_plain_text: text.clone(),
+                acquired_html: None,
+                timestamp: current_timestamp_millis(),
+                backend_serial: None,
+                is_self_write: take_self_write_flag(self_write_text, &text),
+            })
+        }
+    }
+
+    fn current_timestamp_millis() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
     }
 }
 
