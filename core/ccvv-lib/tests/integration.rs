@@ -160,6 +160,59 @@ fn test_regression_code_fence_preserved() {
     assert!(result.contains("```\n"), "Code fence must be closed");
 }
 
+#[test]
+fn test_regression_tracking_params_are_stripped_in_prose_but_not_fenced_code() {
+    let pipeline = default_pipeline();
+    let input = "Use https://www.example.com/path?utm_source=google&id=42 in prose.\n\n```bash\ncurl \"https://www.example.com/api?utm_source=debug&id=7\"\n```";
+    let (result, _) = pipeline.run(input);
+
+    assert!(
+        result.contains("example.com/path?id=42"),
+        "Prose URL should be normalized and keep non-tracking params: {result}"
+    );
+    assert!(
+        result.contains("https://www.example.com/api?utm_source=debug&id=7"),
+        "Fenced code should keep the original URL intact: {result}"
+    );
+}
+
+#[test]
+fn test_regression_fenced_code_indentation_and_spacing_are_preserved() {
+    let pipeline = default_pipeline();
+    let input =
+        "```rust\nfn main() {\n    let answer =  42;\n    println!(\"{}\", answer);\n}\n```";
+    let (result, _) = pipeline.run(input);
+
+    assert!(
+        result.contains("    let answer =  42;"),
+        "Indented code inside fences must not be collapsed: {result}"
+    );
+    assert!(
+        result.contains("println!(\"{}\", answer);"),
+        "Code lines should remain intact inside fences: {result}"
+    );
+}
+
+#[test]
+fn test_regression_mixed_prose_and_fenced_code_keep_block_separation() {
+    let pipeline = default_pipeline();
+    let input = "Intro  paragraph   with extra spacing.\n\n```text\nline one\nline two\n```\n\nTrailing   paragraph.";
+    let (result, _) = pipeline.run(input);
+
+    assert!(
+        result.starts_with("Intro"),
+        "Leading prose should remain before the fenced block: {result}"
+    );
+    assert!(
+        result.contains("\n\n```text\nline one\nline two\n```\n\n"),
+        "Fenced block should remain isolated from surrounding prose: {result}"
+    );
+    assert!(
+        result.contains("Trailing paragraph."),
+        "Trailing prose should remain after the fenced block: {result}"
+    );
+}
+
 // ===== Pipeline Size Limits =====
 
 #[test]

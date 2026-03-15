@@ -19,7 +19,7 @@ pub fn pick_text_target(targets: &[&str]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_text_target, STRING, TEXT, UTF8_PLAIN, UTF8_STRING};
+    use super::{pick_text_target, STRING, TEXT, TEXT_PLAIN, UTF8_PLAIN, UTF8_STRING};
 
     #[test]
     fn test_prefers_utf8_plain_targets_first() {
@@ -31,5 +31,12 @@ mod tests {
     #[test]
     fn test_returns_none_when_no_text_target_exists() {
         assert_eq!(pick_text_target(&["image/png", "text/uri-list"]), None);
+    }
+
+    #[test]
+    fn test_prefers_text_plain_before_legacy_targets() {
+        let target = pick_text_target(&[STRING, TEXT, TEXT_PLAIN]).unwrap();
+
+        assert_eq!(target, TEXT_PLAIN);
     }
 }

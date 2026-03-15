@@ -27,16 +27,16 @@ pub fn extract_plain_text_from_html(html: &str) -> Result<String, HtmlExtractErr
             }
             '>' if in_tag => {
                 let normalized = tag.trim().to_ascii_lowercase();
-                if normalized.starts_with("pre") || normalized.starts_with("code") {
+                let tag_name = normalized
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('/');
+                if tag_name == "pre" || tag_name == "code" {
                     preserve_whitespace = true;
-                } else if normalized.starts_with("/pre") || normalized.starts_with("/code") {
+                } else if tag_name == "/pre" || tag_name == "/code" {
                     preserve_whitespace = false;
-                } else if normalized == "br"
-                    || normalized == "/p"
-                    || normalized == "p"
-                    || normalized == "/div"
-                    || normalized == "div"
-                {
+                } else if matches!(tag_name, "br" | "/p" | "p" | "/div" | "div") {
                     push_newline(&mut output);
                 }
                 in_tag = false;
@@ -167,5 +167,25 @@ mod tests {
         let plain = extract_plain_text_from_html(html).unwrap();
 
         assert_eq!(plain, "fn main() {\n    println!(\"hi\");\n}");
+    }
+
+    #[test]
+    fn test_extracts_entities_and_block_boundaries() {
+        let html = "<div class=\"lead\">Tom &amp; Jerry</div><p>3 &lt; 5&nbsp;times</p><br/><div>&#x1F642;</div>";
+        let plain = extract_plain_text_from_html(html).unwrap();
+
+        assert_eq!(plain, "Tom & Jerry\n3 < 5 times\n🙂");
+    }
+
+    #[test]
+    fn test_pre_block_keeps_spacing_between_surrounding_blocks() {
+        let html =
+            "<div>Before</div><pre>fn main() {\n    println!(&quot;hi&quot;);\n}</pre><div>After</div>";
+        let plain = extract_plain_text_from_html(html).unwrap();
+
+        assert_eq!(
+            plain,
+            "Before\nfn main() {\n    println!(\"hi\");\n}\nAfter"
+        );
     }
 }

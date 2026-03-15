@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use crate::clipboard::html::{extract_plain_text_from_html, HtmlExtractError};
 use crate::clipboard::targets::{pick_text_target, HtmlPreference, TEXT_HTML};
 
+pub mod gnome;
 pub mod html;
 pub mod targets;
 
@@ -88,6 +89,45 @@ mod tests {
         assert_eq!(candidate.plain_text, "plain text");
         assert_eq!(candidate.source_mime, UTF8_STRING);
         assert!(candidate.html.is_none());
+    }
+
+    #[test]
+    fn test_malformed_html_falls_back_to_plain_text() {
+        let mut offers = HashMap::new();
+        offers.insert(TEXT_HTML.to_string(), b"<div".to_vec());
+        offers.insert(UTF8_STRING.to_string(), b"plain text".to_vec());
+
+        let candidate = acquire_text_candidate(&offers, HtmlPreference::PreferHtml).unwrap();
+
+        assert_eq!(candidate.plain_text, "plain text");
+        assert_eq!(candidate.source_mime, UTF8_STRING);
+        assert!(candidate.html.is_none());
+    }
+
+    #[test]
+    fn test_plain_text_only_ignores_extractable_html() {
+        let mut offers = HashMap::new();
+        offers.insert(
+            TEXT_HTML.to_string(),
+            b"<p>Hello <strong>world</strong></p>".to_vec(),
+        );
+        offers.insert(UTF8_STRING.to_string(), b"Hello world (plain)".to_vec());
+
+        let candidate = acquire_text_candidate(&offers, HtmlPreference::PlainTextOnly).unwrap();
+
+        assert_eq!(candidate.plain_text, "Hello world (plain)");
+        assert_eq!(candidate.source_mime, UTF8_STRING);
+        assert!(candidate.html.is_none());
+    }
+
+    #[test]
+    fn test_malformed_html_without_plain_target_errors() {
+        let mut offers = HashMap::new();
+        offers.insert(TEXT_HTML.to_string(), b"<div".to_vec());
+
+        let error = acquire_text_candidate(&offers, HtmlPreference::PreferHtml).unwrap_err();
+
+        assert_eq!(error, AcquisitionError::NoTextTarget);
     }
 
     #[test]

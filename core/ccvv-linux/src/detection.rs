@@ -257,4 +257,54 @@ mod tests {
             DetectionOutcome::TrackedFirstCopy
         );
     }
+
+    #[test]
+    fn test_self_write_does_not_arm_follow_up_trigger() {
+        let mut state = DetectorState::new();
+
+        assert_eq!(
+            state.observe(&snapshot("hello", 100, true, SelectionKind::Clipboard)),
+            DetectionOutcome::IgnoredSelfWrite
+        );
+        assert_eq!(
+            state.observe(&snapshot("hello", 150, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TrackedFirstCopy
+        );
+    }
+
+    #[test]
+    fn test_triggered_clean_resets_same_text_to_first_copy() {
+        let mut state = DetectorState::new();
+
+        assert_eq!(
+            state.observe(&snapshot("hello", 100, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TrackedFirstCopy
+        );
+        assert_eq!(
+            state.observe(&snapshot("hello", 200, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TriggeredClean
+        );
+        assert_eq!(
+            state.observe(&snapshot("hello", 260, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TrackedFirstCopy
+        );
+    }
+
+    #[test]
+    fn test_different_text_starts_new_candidate_chain() {
+        let mut state = DetectorState::new();
+
+        assert_eq!(
+            state.observe(&snapshot("hello", 100, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TrackedFirstCopy
+        );
+        assert_eq!(
+            state.observe(&snapshot("world", 180, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TrackedFirstCopy
+        );
+        assert_eq!(
+            state.observe(&snapshot("world", 260, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TriggeredClean
+        );
+    }
 }
