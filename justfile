@@ -47,6 +47,15 @@ semgrep:
   command -v semgrep >/dev/null 2>&1 || { echo "semgrep not found. Install: brew install semgrep"; exit 1; }
   semgrep scan --config auto --error core mac
 
+# Lint GitHub Actions workflows.
+actionlint:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  command -v actionlint >/dev/null 2>&1 || { echo "actionlint not found. Install: brew install actionlint"; exit 1; }
+  if [ -d .github/workflows ]; then
+    actionlint .github/workflows/*.yml
+  fi
+
 # Shell script linting.
 shellcheck:
   #!/usr/bin/env bash
@@ -75,6 +84,15 @@ coverage-html:
   command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "cargo-llvm-cov not found. Install: cargo install cargo-llvm-cov"; exit 1; }
   cd core && cargo llvm-cov --workspace --html --output-dir target/coverage/html
 
+# Fast local gate aligned with the pre-commit hook.
+pre-commit: actionlint fmt-check lint test
+
+# Broader local validation without SonarQube.
+check-local: pre-commit shellcheck semgrep audit
+
+# Full local quality gate.
+check: check-local sonar
+
 # Run SonarQube: clippy report → scan → terminal report → quality gate (fails if gate doesn't pass).
 sonar:
   #!/usr/bin/env bash
@@ -90,7 +108,7 @@ sonar:
 
   # 1. Generate clippy JSON report
   printf '=== Clippy Report ===\n'
-  cd core && cargo clippy --workspace --all-targets --message-format=json 2>/dev/null \
+  cd core && cargo clippy --workspace --all-targets --all-features --message-format=json 2>/dev/null \
     | jq -s '[.[] | select(.reason == "compiler-message")]' > target/clippy-report.json || true
   cd ..
 
