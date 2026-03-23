@@ -146,10 +146,16 @@ func compactParagraph(_ lines: [ParagraphLine]) -> String {
     var buffer = ""
     let baseIndent = lines.map(\.indent).min() ?? 0
     var lastListItemRelIndent = 0
+    // When a continuation at indent C joins a list item at indent L (C > L),
+    // subsequent list items at indent C are promoted to indent L.
+    var promotedIndents: [Int: Int] = [:]
 
     for entry in lines {
-        let relativeIndent = max(0, entry.indent - baseIndent)
+        var relativeIndent = max(0, entry.indent - baseIndent)
         if isListItem(entry.text) {
+            if let promoted = promotedIndents[relativeIndent] {
+                relativeIndent = promoted
+            }
             if !buffer.isEmpty {
                 outputLines.append(buffer)
                 buffer = ""
@@ -159,7 +165,10 @@ func compactParagraph(_ lines: [ParagraphLine]) -> String {
         } else if !outputLines.isEmpty &&
             isListItemWithOptionalIndent(outputLines.last!) &&
             buffer.isEmpty &&
-            relativeIndent > lastListItemRelIndent {
+            relativeIndent >= lastListItemRelIndent {
+            if relativeIndent > lastListItemRelIndent {
+                promotedIndents[relativeIndent] = lastListItemRelIndent
+            }
             outputLines[outputLines.count - 1] += " " + entry.text
         } else {
             buffer = buffer.isEmpty ? entry.text : buffer + " " + entry.text

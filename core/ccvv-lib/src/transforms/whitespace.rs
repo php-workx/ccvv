@@ -343,6 +343,9 @@ struct CompactState {
     last_buffer_raw_len: usize,
     base_indent: usize,
     last_list_item_rel_indent: usize,
+    /// When a continuation at indent C joins a list item at indent L (C > L),
+    /// subsequent list items at indent C are promoted to indent L.
+    promoted_indents: std::collections::HashMap<usize, usize>,
 }
 
 impl CompactState {
@@ -353,6 +356,7 @@ impl CompactState {
             last_buffer_raw_len: 0,
             base_indent: lines.iter().map(|l| l.indent).min().unwrap_or(0),
             last_list_item_rel_indent: 0,
+            promoted_indents: std::collections::HashMap::new(),
         }
     }
 
@@ -363,15 +367,24 @@ impl CompactState {
         terminal_width: usize,
     ) {
         if is_list_item(&entry.text) {
+            let effective_indent = self
+                .promoted_indents
+                .get(&relative_indent)
+                .copied()
+                .unwrap_or(relative_indent);
             self.flush_buffer();
-            self.last_list_item_rel_indent = relative_indent;
-            let indent_str = " ".repeat(relative_indent);
+            self.last_list_item_rel_indent = effective_indent;
+            let indent_str = " ".repeat(effective_indent);
             self.output_lines
                 .push(format!("{}{}", indent_str, entry.text));
         } else if is_shell_command(&entry.text) {
             self.flush_buffer();
             self.output_lines.push(entry.text.clone());
         } else if self.is_list_continuation(relative_indent) {
+            if relative_indent > self.last_list_item_rel_indent {
+                self.promoted_indents
+                    .insert(relative_indent, self.last_list_item_rel_indent);
+            }
             let last = self.output_lines.last_mut().unwrap();
             last.push(' ');
             last.push_str(&entry.text);
@@ -753,6 +766,40 @@ mod tests {
         assert_eq!(
             result,
             "- Long list item that wraps at the terminal boundary and continues further"
+        );
+    }
+
+    #[test]
+    fn test_wrapped_flat_list_promoted() {
+        // Agent output: first bullet at indent 0, rest at indent 2 with wrapped continuations.
+        // All bullets are logically at the same level — the indent is a wrapping artifact.
+        let input = "\
+- Add LLM judge for command classifications that catches false\n\
+  positives and missed risks\n\
+  - Add shadow mode for risk-free evaluation\n\
+  - Add judge accuracy dashboard with agreement rates, upgrade/downgrade\n\
+  counts, and latency\n\
+  - Add per-event judge column showing agreement with\n\
+  confidence scores";
+        let result = ccvv(input);
+        assert_eq!(
+            result,
+            "\
+- Add LLM judge for command classifications that catches false positives and missed risks\n\
+- Add shadow mode for risk-free evaluation\n\
+- Add judge accuracy dashboard with agreement rates, upgrade/downgrade counts, and latency\n\
+- Add per-event judge column showing agreement with confidence scores"
+        );
+    }
+
+    #[test]
+    fn test_genuine_nested_list_preserved() {
+        // Genuine nesting (no continuation before sub-bullets) should be preserved.
+        let input = "- Top level item\n  - Nested item 1\n  - Nested item 2";
+        let result = ccvv(input);
+        assert_eq!(
+            result,
+            "- Top level item\n  - Nested item 1\n  - Nested item 2"
         );
     }
 
