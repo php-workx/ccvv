@@ -5,15 +5,19 @@ default:
   @just --list
 
 # Format Rust code.
-fmt:
+format:
   cd core && cargo fmt --all
 
 # Check Rust formatting without writing changes.
-fmt-check:
+format-check:
   cd core && cargo fmt --all -- --check
 
 # Run clippy with warnings denied.
 lint:
+  cd core && cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged -- -D warnings
+
+# Verify clippy with warnings denied.
+lint-check:
   cd core && cargo clippy --workspace --all-targets -- -D warnings
 
 # Run full test suite.
@@ -61,7 +65,7 @@ shellcheck:
   #!/usr/bin/env bash
   set -euo pipefail
   command -v shellcheck >/dev/null 2>&1 || { echo "shellcheck not found. Install: brew install shellcheck"; exit 1; }
-  { find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*' -print0; find .githooks -maxdepth 1 -type f -print0 2>/dev/null; } | xargs -0 shellcheck --
+  { find . -name '*.sh' -not -path '*/target/*' -not -path '*/.git/*' -print0; find scripts -maxdepth 1 -type f -print0 2>/dev/null; } | xargs -0 shellcheck --
 
 # Dependency vulnerability audit.
 audit:
@@ -69,6 +73,13 @@ audit:
   set -euo pipefail
   command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not found. Install: cargo install cargo-audit"; exit 1; }
   cd core && cargo audit
+
+# Scan git history for leaked secrets locally. CI uses TruffleHog.
+betterleaks:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	command -v betterleaks >/dev/null 2>&1 || { echo "error: betterleaks is required for this gate" >&2; exit 127; }
+	betterleaks git --no-banner
 
 # Generate LCOV coverage report.
 coverage:
@@ -85,10 +96,10 @@ coverage-html:
   cd core && cargo llvm-cov --workspace --html --output-dir target/coverage/html
 
 # Fast local gate aligned with the pre-commit hook.
-pre-commit: actionlint fmt-check lint test
+pre-commit: actionlint format-check lint-check test betterleaks
 
 # Broader local validation without SonarQube.
-check-local: pre-commit shellcheck semgrep audit
+check-local: pre-commit shellcheck semgrep audit betterleaks
 
 # Full local quality gate.
 check: check-local sonar
@@ -228,6 +239,7 @@ dev-setup:
   command -v brew >/dev/null 2>&1 || { echo "Homebrew is required. Install from https://brew.sh"; exit 1; }
   ensure_brew shellcheck
   ensure_brew semgrep
+  ensure_brew betterleaks
   ensure_brew jq
 
   # Cargo tools
@@ -245,18 +257,23 @@ dev-setup:
 
   # Git hooks
   HOOKS=$(cd "$(git rev-parse --show-toplevel)" && git config core.hooksPath 2>/dev/null || true)
-  if [ "$HOOKS" = ".githooks" ]; then
+  if [ -z "$HOOKS" ]; then
     printf '✓ git hooks\n'
   else
-    printf 'Configuring git hooks path...\n'
-    git config core.hooksPath .githooks
+    printf 'Clearing legacy hooks path...\n'
+    git config --unset core.hooksPath || true
   fi
+  just install-hooks
 
   printf '\nDev setup complete. Run: just dev\n'
   printf 'For the full quality gate (incl. SonarQube): just sonar-setup && just check\n'
 
 # Common local preflight.
 dev: check-local
+
+# Install local git hooks into .git/hooks.
+install-hooks:
+  bash scripts/install-hooks.sh
 
 # Full validation incl. coverage output.
 check-all: check coverage-html

@@ -25,7 +25,7 @@ jobs:
         with:
           workspaces: core
       - name: Check formatting
-        run: just fmt-check
+        run: just format-check
 
   clippy:
     name: Rust Lint (Clippy)
@@ -44,7 +44,7 @@ jobs:
       - name: Install Linux build dependencies
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxfixes-dev libwayland-dev
       - name: Run clippy
-        run: just lint
+        run: just lint-check
 
   test:
     name: Rust Tests
@@ -283,3 +283,16 @@ jobs:
         with:
           name: lcov
           path: core/target/coverage/lcov.info
+
+  trufflehog:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --results=verified,unknown
