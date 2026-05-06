@@ -140,6 +140,8 @@ struct DaemonStateInner {
     subscribers: Mutex<Vec<mpsc::Sender<StatusSnapshot>>>,
     quitting: AtomicBool,
     clean_requested: AtomicBool,
+    restore_requested: AtomicBool,
+    open_config_requested: AtomicBool,
 }
 
 impl DaemonState {
@@ -150,6 +152,8 @@ impl DaemonState {
                 subscribers: Mutex::new(Vec::new()),
                 quitting: AtomicBool::new(false),
                 clean_requested: AtomicBool::new(false),
+                restore_requested: AtomicBool::new(false),
+                open_config_requested: AtomicBool::new(false),
             }),
         }
     }
@@ -216,6 +220,41 @@ impl DaemonState {
 
     pub fn take_clean_request(&self) -> bool {
         self.inner.clean_requested.swap(false, Ordering::SeqCst)
+    }
+
+    pub fn request_restore(&self) {
+        self.inner.restore_requested.store(true, Ordering::SeqCst);
+    }
+
+    pub fn take_restore_request(&self) -> bool {
+        self.inner.restore_requested.swap(false, Ordering::SeqCst)
+    }
+
+    pub fn set_restore_available(&self, available: bool) {
+        self.update_status(|status| status.restore_available = available);
+    }
+
+    pub fn request_open_config(&self) {
+        self.inner
+            .open_config_requested
+            .store(true, Ordering::SeqCst);
+    }
+
+    pub fn take_open_config_request(&self) -> bool {
+        self.inner
+            .open_config_requested
+            .swap(false, Ordering::SeqCst)
+    }
+
+    pub fn diagnostics_string(&self) -> String {
+        let snapshot = self.snapshot();
+        format!(
+            "backend={};capability={};paused={};version={}",
+            snapshot.backend.as_str(),
+            snapshot.capability.as_str(),
+            snapshot.paused,
+            env!("CARGO_PKG_VERSION")
+        )
     }
 
     fn broadcast(&self, snapshot: StatusSnapshot) {
@@ -296,6 +335,23 @@ fn handle_client(mut stream: UnixStream, state: DaemonState) -> Result<(), Runti
             } else {
                 write_error(&mut stream, "clean-now-unavailable")?;
             }
+        }
+        ControlCommand::Restore => {
+            if state.snapshot().restore_available {
+                state.request_restore();
+                write_ok(&mut stream)?;
+            } else {
+                write_error(&mut stream, "restore-unavailable")?;
+            }
+        }
+        ControlCommand::OpenConfig => {
+            state.request_open_config();
+            write_ok(&mut stream)?;
+        }
+        ControlCommand::Diagnostics => {
+            let diagnostic = state.diagnostics_string();
+            stream.write_all(diagnostic.as_bytes())?;
+            stream.write_all(b"\n")?;
         }
         ControlCommand::Quit => {
             state.request_quit();
@@ -544,6 +600,7 @@ mod tests {
             capability: crate::ui_protocol::BackendCapability::Limited,
             last_clean_succeeded: true,
             clean_now_available: false,
+            restore_available: false,
         });
 
         let state_for_thread = state.clone();

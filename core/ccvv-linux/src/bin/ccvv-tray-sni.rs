@@ -82,6 +82,11 @@ impl ksni::Tray for StatusNotifierTray {
                 is_action_enabled(&self.status, TrayAction::CleanNow),
             ),
             standard_item(
+                "Restore Last Cleaned Item",
+                Some(TrayAction::Restore),
+                is_action_enabled(&self.status, TrayAction::Restore),
+            ),
+            standard_item(
                 if self.status.paused {
                     "Resume"
                 } else {
@@ -107,6 +112,8 @@ impl ksni::Tray for StatusNotifierTray {
                 ..Default::default()
             }
             .into(),
+            standard_item("Open Config Directory", Some(TrayAction::OpenConfig), true),
+            standard_item("Run Diagnostics", Some(TrayAction::Diagnostics), true),
             StandardItem {
                 label: "Quit".into(),
                 icon_name: "application-exit-symbolic".into(),
@@ -172,6 +179,9 @@ fn guarded_action(socket_path: &Path, action: TrayAction) -> Result<(), TrayErro
                 TrayAction::Pause => "pause",
                 TrayAction::Resume => "resume",
                 TrayAction::CleanNow => "clean-now",
+                TrayAction::Restore => "restore",
+                TrayAction::OpenConfig => "open-config",
+                TrayAction::Diagnostics => "diagnostics",
                 TrayAction::Quit => "quit",
             }
         )));

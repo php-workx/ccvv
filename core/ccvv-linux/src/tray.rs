@@ -72,6 +72,9 @@ pub fn is_action_enabled(status: &StatusSnapshot, action: TrayAction) -> bool {
         TrayAction::Pause => !status.paused,
         TrayAction::Resume => status.paused,
         TrayAction::CleanNow => status.clean_now_available,
+        TrayAction::Restore => status.restore_available,
+        TrayAction::OpenConfig => true,
+        TrayAction::Diagnostics => true,
         TrayAction::Quit => true,
     }
 }
@@ -86,6 +89,9 @@ pub fn send_menu_action(socket_path: &Path, action: TrayAction) -> Result<(), Tr
         TrayAction::Pause => ControlCommand::Pause,
         TrayAction::Resume => ControlCommand::Resume,
         TrayAction::CleanNow => ControlCommand::CleanNow,
+        TrayAction::Restore => ControlCommand::Restore,
+        TrayAction::OpenConfig => ControlCommand::OpenConfig,
+        TrayAction::Diagnostics => ControlCommand::Diagnostics,
         TrayAction::Quit => ControlCommand::Quit,
     };
 
@@ -128,6 +134,9 @@ pub enum TrayAction {
     Pause,
     Resume,
     CleanNow,
+    Restore,
+    OpenConfig,
+    Diagnostics,
     Quit,
 }
 
@@ -181,6 +190,7 @@ mod tests {
             capability: BackendCapability::DiagnosticsOnly,
             last_clean_succeeded: true,
             clean_now_available: false,
+            restore_available: false,
         };
 
         assert_eq!(icon_for_status(&status), TrayIcon::Paused);
@@ -194,6 +204,7 @@ mod tests {
             capability: BackendCapability::Limited,
             last_clean_succeeded: false,
             clean_now_available: false,
+            restore_available: false,
         };
 
         assert_eq!(freedesktop_icon_name(&status), "dialog-information");
@@ -266,6 +277,7 @@ mod tests {
                     capability: BackendCapability::DiagnosticsOnly,
                     last_clean_succeeded: true,
                     clean_now_available: false,
+                    restore_available: false,
                 },
                 StatusSnapshot {
                     paused: true,
@@ -273,6 +285,7 @@ mod tests {
                     capability: BackendCapability::Limited,
                     last_clean_succeeded: true,
                     clean_now_available: true,
+                    restore_available: false,
                 },
             ] {
                 stream.write_all(status.encode_line().as_bytes()).unwrap();
@@ -296,6 +309,7 @@ mod tests {
             capability: BackendCapability::Limited,
             last_clean_succeeded: true,
             clean_now_available: false,
+            restore_available: false,
         };
 
         assert!(!is_action_enabled(&status, TrayAction::CleanNow));
@@ -316,6 +330,7 @@ mod tests {
                 capability: BackendCapability::DiagnosticsOnly,
                 last_clean_succeeded: true,
                 clean_now_available: false,
+                restore_available: false,
             };
 
             stream.write_all(response.encode_line().as_bytes()).unwrap();

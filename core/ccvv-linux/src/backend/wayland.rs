@@ -265,6 +265,23 @@ mod real {
                 .is_ok()
         }
 
+        fn try_read_clipboard_html() -> Option<String> {
+            let output = Command::new("wl-paste")
+                .args(["--type", "text/html"])
+                .output()
+                .ok()?;
+            if !output.status.success() || output.stdout.is_empty() {
+                return None;
+            }
+            if output.stdout.len() > crate::clipboard::html::MAX_HTML_BYTES {
+                return None;
+            }
+            let html = String::from_utf8_lossy(&output.stdout).into_owned();
+            crate::clipboard::html::extract_plain_text_from_html(&html)
+                .ok()
+                .map(|_| html)
+        }
+
         fn read_clipboard_text() -> Result<String, BackendError> {
             let output = Command::new("wl-paste").output().map_err(|error| {
                 BackendError::Protocol(format!("failed to execute wl-paste: {error}"))
@@ -345,6 +362,7 @@ mod real {
             self.ensure_connected()?;
             if self.limited {
                 let text = Self::read_clipboard_text()?;
+                let acquired_html = Self::try_read_clipboard_html();
                 let seat_id = self.primary_seat_id().to_string();
                 let is_self_write =
                     take_self_write_flag(&self.last_self_text_by_seat, &seat_id, &text);
@@ -353,7 +371,7 @@ mod real {
                     seat_id,
                     selection_kind: SelectionKind::Clipboard,
                     acquired_plain_text: text,
-                    acquired_html: None,
+                    acquired_html,
                     timestamp: current_timestamp_ms(),
                     backend_serial: Some(self.self_serial),
                     is_self_write,
@@ -598,6 +616,8 @@ mod real {
                     continue;
                 }
 
+                let acquired_html = self.try_read_offer_html(queue, &offer);
+
                 let is_self_write =
                     take_self_write_flag(&self.last_self_text_by_seat, &seat_id, &text);
 
@@ -609,7 +629,7 @@ mod real {
                     seat_id,
                     selection_kind: SelectionKind::Clipboard,
                     acquired_plain_text: text,
-                    acquired_html: None,
+                    acquired_html,
                     timestamp: current_timestamp_ms(),
                     backend_serial: None,
                     is_self_write,
@@ -617,6 +637,37 @@ mod real {
             }
 
             Ok(())
+        }
+
+        fn try_read_offer_html(
+            &mut self,
+            queue: &mut EventQueue<Self>,
+            offer: &MonitorOffer,
+        ) -> Option<String> {
+            let has_html = self
+                .offers
+                .get(offer)
+                .map(|mimes| mimes.iter().any(|m| m == "text/html"))
+                .unwrap_or(false);
+            if !has_html {
+                return None;
+            }
+
+            let (mut reader, writer) = UnixStream::pair().ok()?;
+            offer.receive("text/html".to_string(), writer.as_fd());
+            drop(writer);
+
+            queue.roundtrip(self).ok()?;
+
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).ok()?;
+            if bytes.len() > crate::clipboard::html::MAX_HTML_BYTES {
+                return None;
+            }
+            let html = String::from_utf8(bytes).ok()?;
+            crate::clipboard::html::extract_plain_text_from_html(&html)
+                .ok()
+                .map(|_| html)
         }
 
         fn read_offer_text(

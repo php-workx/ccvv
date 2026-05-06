@@ -15,17 +15,21 @@ const TEST_TRIGGER_ENV: &str = "CCVV_PORTAL_TEST_TRIGGER";
 /// to register a "clean clipboard" action. Requires a compositor
 /// that supports this portal (GNOME 44+, KDE Plasma 6+).
 ///
-/// Full request/session plumbing is still pending. For v1 this backend now
-/// performs a concrete portal probe instead of relying only on desktop hints,
-/// and reports when the host can support an explicit hotkey flow.
+/// Registration uses `gdbus call` to invoke `CreateSession` and
+/// `BindShortcuts` with shortcut id `ccvv-clean` and preferred binding
+/// `Super+Alt+C`.
 #[derive(Debug)]
 pub struct PortalHotkey {
     registered: bool,
+    session_path: Option<String>,
 }
 
 impl PortalHotkey {
     pub fn new() -> Self {
-        Self { registered: false }
+        Self {
+            registered: false,
+            session_path: None,
+        }
     }
 
     pub fn is_available() -> bool {
@@ -101,6 +105,77 @@ impl Default for PortalHotkey {
     }
 }
 
+impl PortalHotkey {
+    fn create_session(&mut self) -> Result<String, HotkeyError> {
+        let session_token = format!("ccvv_{}", std::process::id());
+        let output = Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                PORTAL_DESTINATION,
+                "--object-path",
+                PORTAL_OBJECT_PATH,
+                "--method",
+                &format!("{GLOBAL_SHORTCUTS_INTERFACE}.CreateSession"),
+                &format!("{{'handle_token': <'ccvv_req_{}'>, 'session_handle_token': <'{session_token}'>}}", std::process::id()),
+            ])
+            .output()
+            .map_err(|e| HotkeyError::Portal(format!("failed to invoke CreateSession: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(HotkeyError::Portal(format!(
+                "CreateSession failed: {stderr}"
+            )));
+        }
+
+        // Extract session path from response: typically /org/freedesktop/portal/desktop/session/<sender>/<token>
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let session_path = extract_object_path(&stdout).unwrap_or_else(|| {
+            format!("/org/freedesktop/portal/desktop/session/ccvv/{session_token}")
+        });
+
+        Ok(session_path)
+    }
+
+    fn bind_shortcuts(&self, session_path: &str) -> Result<(), HotkeyError> {
+        let output = Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                PORTAL_DESTINATION,
+                "--object-path",
+                PORTAL_OBJECT_PATH,
+                "--method",
+                &format!("{GLOBAL_SHORTCUTS_INTERFACE}.BindShortcuts"),
+                session_path,
+                "[('ccvv-clean', {'description': <'Clean clipboard'>, 'preferred_trigger': <'Super+Alt+C'>})]",
+                "",
+                "{}",
+            ])
+            .output()
+            .map_err(|e| HotkeyError::Portal(format!("failed to invoke BindShortcuts: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(HotkeyError::Portal(format!(
+                "BindShortcuts failed: {stderr}"
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+fn extract_object_path(gdbus_output: &str) -> Option<String> {
+    // gdbus call returns something like: (objectpath '/org/...', @a{sv} {})
+    let start = gdbus_output.find("'/")? + 1;
+    let end = gdbus_output[start..].find('\'')? + start;
+    Some(gdbus_output[start..end].to_string())
+}
+
 impl HotkeyBackend for PortalHotkey {
     fn register(&mut self) -> Result<HotkeyRegistration, HotkeyError> {
         if !Self::is_available() {
@@ -108,8 +183,21 @@ impl HotkeyBackend for PortalHotkey {
             return Ok(HotkeyRegistration::Unavailable);
         }
 
-        self.registered = true;
-        Ok(HotkeyRegistration::Registered)
+        match self.create_session() {
+            Ok(session_path) => {
+                if let Err(error) = self.bind_shortcuts(&session_path) {
+                    eprintln!("ccvv-linux: portal BindShortcuts failed (non-fatal): {error}");
+                }
+                self.session_path = Some(session_path);
+                self.registered = true;
+                Ok(HotkeyRegistration::Registered)
+            }
+            Err(error) => {
+                eprintln!("ccvv-linux: portal CreateSession failed: {error}");
+                self.registered = false;
+                Ok(HotkeyRegistration::Unavailable)
+            }
+        }
     }
 
     fn wait_for_activation(&mut self) -> Result<(), HotkeyError> {
