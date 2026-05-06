@@ -94,11 +94,26 @@ pub enum AppError {
     SingleInstance(#[from] crate::single_instance::SingleInstanceError),
     #[error("internal thread panicked: {0}")]
     ThreadPanic(String),
+    #[error("no display server detected (WAYLAND_DISPLAY/DISPLAY unset); ccvv-linux requires a desktop session — use the `ccvv` CLI for headless workflows")]
+    NoDisplayServer,
 }
 
 pub fn run(options: AppOptions) -> Result<(), AppError> {
     let config = load_config(options.config_path.as_deref())?;
     let resolved = resolve_config(&config, options.profile.as_deref())?;
+
+    let backend = select_backend(&options);
+
+    // Spec §9.2: when running under XDG autostart / a systemd user unit,
+    // the daemon must exit cleanly if it was launched without a desktop
+    // session (no WAYLAND_DISPLAY and no DISPLAY) so the supervisor doesn't
+    // keep an idle "DiagnosticsOnly" daemon alive forever. We only enforce
+    // this in `Auto` mode — explicit `--backend none` still keeps the
+    // diagnostics-only path for tests and CI smoke checks.
+    if matches!(options.backend, BackendOverride::Auto) && matches!(backend, RuntimeBackend::None) {
+        return Err(AppError::NoDisplayServer);
+    }
+
     let bootstrap = bootstrap(&options)?;
 
     let Bootstrap {
@@ -107,8 +122,6 @@ pub fn run(options: AppOptions) -> Result<(), AppError> {
         singleton,
         ..
     } = bootstrap;
-
-    let backend = select_backend(&options);
     let limited_mode = if matches!(backend, RuntimeBackend::Limited) {
         Some(detect_limited_mode())
     } else {
@@ -157,6 +170,27 @@ pub fn run(options: AppOptions) -> Result<(), AppError> {
         let _ = loop_errors_tx.send(result.map_err(AppError::from));
     });
 
+    // Spawn portal hotkey thread for limited mode
+    if matches!(backend, RuntimeBackend::Limited) {
+        let hotkey_state = daemon_state.clone();
+        thread::Builder::new()
+            .name("ccvv-hotkey".into())
+            .spawn(move || {
+                use crate::hotkey::{HotkeyBackend, PortalHotkey};
+                let mut hotkey = PortalHotkey::new();
+                if hotkey
+                    .register()
+                    .is_ok_and(|reg| matches!(reg, crate::hotkey::HotkeyRegistration::Registered))
+                {
+                    eprintln!("ccvv-linux: portal hotkey registered");
+                    while hotkey.wait_for_activation().is_ok() {
+                        hotkey_state.request_clean_now();
+                    }
+                }
+            })
+            .ok();
+    }
+
     let loop_result = run_clipboard_loop(
         backend,
         loop_state,
@@ -195,7 +229,11 @@ fn run_clipboard_loop(
     signal_quit: &AtomicBool,
 ) -> Result<(), AppError> {
     let mut backend = build_backend(backend);
-    let mut detector = DetectorState::new();
+    // Wire the config-resolved double-tap window into the detector. When the
+    // user pinned a fixed value (`Fixed(ms)` in config), that takes precedence
+    // over per-seat adaptive timing per spec §7.2. `None` keeps adaptive mode.
+    let mut detector =
+        DetectorState::with_fixed_window_ms(resolved.resolved_double_tap_ms.map(u64::from));
     let pipeline = Pipeline::from_resolved_config(resolved);
     let poll_interval = Duration::from_millis(250);
     let capability = backend.capability();
@@ -218,6 +256,8 @@ fn run_clipboard_loop(
         }
 
         process_clean_request(backend.as_mut(), capability, &loop_context);
+        process_restore_request(backend.as_mut(), &loop_context);
+        process_open_config_request(&loop_context);
 
         if let Some(stream_rx) = stream.as_mut() {
             if matches!(
@@ -283,6 +323,45 @@ fn process_clean_request(
     match backend.read_snapshot() {
         Ok(snapshot) => run_clean(snapshot, backend, loop_context),
         Err(_) => handle_clean_request_unavailable(capability, loop_context.state),
+    }
+}
+
+fn process_restore_request(backend: &mut dyn ClipboardBackend, loop_context: &LoopContext<'_>) {
+    if !loop_context.state.take_restore_request() {
+        return;
+    }
+
+    match loop_context.history.undo_raw() {
+        Some(original_text) => {
+            if let Err(error) = backend.write_plain_text(&original_text) {
+                eprintln!("ccvv-linux: restore write failed: {error}");
+                loop_context.state.set_last_clean_succeeded(false);
+            }
+            loop_context.state.set_restore_available(false);
+        }
+        None => {
+            eprintln!("ccvv-linux: no item available to restore");
+            loop_context.state.set_restore_available(false);
+        }
+    }
+}
+
+fn process_open_config_request(loop_context: &LoopContext<'_>) {
+    if !loop_context.state.take_open_config_request() {
+        return;
+    }
+
+    let config_dir = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".ccvv"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".ccvv"));
+
+    if let Err(error) = std::process::Command::new("xdg-open")
+        .arg(&config_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        eprintln!("ccvv-linux: failed to open config directory: {error}");
     }
 }
 
@@ -413,6 +492,7 @@ fn handle_snapshot(
     }
 
     state.set_last_clean_succeeded(true);
+    state.set_restore_available(true);
     Ok(true)
 }
 
@@ -442,6 +522,7 @@ fn status_snapshot_for_backend(
         capability,
         last_clean_succeeded: true,
         clean_now_available,
+        restore_available: false,
     }
 }
 
@@ -745,6 +826,7 @@ mod tests {
                 capability: BackendCapability::Automatic,
                 last_clean_succeeded: true,
                 clean_now_available: true,
+                restore_available: false,
             }
         );
         assert_eq!(
@@ -755,6 +837,7 @@ mod tests {
                 capability: BackendCapability::Automatic,
                 last_clean_succeeded: true,
                 clean_now_available: true,
+                restore_available: false,
             }
         );
         assert_eq!(
@@ -765,6 +848,7 @@ mod tests {
                 capability: BackendCapability::Limited,
                 last_clean_succeeded: true,
                 clean_now_available: true,
+                restore_available: false,
             }
         );
         assert_eq!(
@@ -775,6 +859,7 @@ mod tests {
                 capability: BackendCapability::DiagnosticsOnly,
                 last_clean_succeeded: true,
                 clean_now_available: false,
+                restore_available: false,
             }
         );
         assert_eq!(
@@ -785,6 +870,7 @@ mod tests {
                 capability: BackendCapability::Limited,
                 last_clean_succeeded: true,
                 clean_now_available: true,
+                restore_available: false,
             }
         );
     }
@@ -847,6 +933,7 @@ mod tests {
                 capability: BackendCapability::DiagnosticsOnly,
                 last_clean_succeeded: true,
                 clean_now_available: false,
+                restore_available: false,
             }
         );
 
@@ -889,6 +976,32 @@ mod tests {
     }
 
     #[test]
+    fn test_run_in_auto_mode_without_display_server_exits_with_no_display_server_error() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_wayland = std::env::var_os("WAYLAND_DISPLAY");
+        let old_display = std::env::var_os("DISPLAY");
+        let old_session = std::env::var_os("XDG_SESSION_TYPE");
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("XDG_SESSION_TYPE");
+
+        let result = run(AppOptions {
+            backend: BackendOverride::Auto,
+            config_path: None,
+            profile: None,
+        });
+
+        assert!(
+            matches!(result, Err(super::AppError::NoDisplayServer)),
+            "expected NoDisplayServer in auto mode without display, got {result:?}"
+        );
+
+        restore_env_var("WAYLAND_DISPLAY", old_wayland);
+        restore_env_var("DISPLAY", old_display);
+        restore_env_var("XDG_SESSION_TYPE", old_session);
+    }
+
+    #[test]
     fn test_clean_now_marks_last_clean_as_failed_when_snapshot_is_unavailable() {
         let _guard = ENV_LOCK.lock().unwrap();
         let home_dir = temp_dir("home");
@@ -924,6 +1037,7 @@ mod tests {
             capability: BackendCapability::DiagnosticsOnly,
             last_clean_succeeded: true,
             clean_now_available: false,
+            restore_available: false,
         });
 
         let resolved = ccvv_lib::config::ResolvedConfig::default();

@@ -149,31 +149,109 @@ mod real {
                 return Err(BackendError::Unavailable);
             }
 
-            self.request_selection_conversion()?;
-            let deadline = std::time::Instant::now() + SELECTION_TIMEOUT;
-            while std::time::Instant::now() < deadline {
-                if let Some(notify) = self.poll_selection_notify()? {
-                    return self.handle_selection_notify(notify);
+            // Spec §6.1 acquisition order: prefer UTF-8 plain text, fall back
+            // through legacy text targets for older X clients that only offer
+            // TEXT/STRING. Most owners offer UTF8_STRING and the first attempt
+            // succeeds; the loop only matters for legacy clipboard providers.
+            const TEXT_TARGET_NAMES: [&[u8]; 4] = [
+                b"UTF8_STRING",
+                b"text/plain;charset=utf-8",
+                b"TEXT",
+                b"STRING",
+            ];
+            let mut last_err: Option<BackendError> = None;
+            for name in TEXT_TARGET_NAMES {
+                let atom = Self::intern_atom(&self.conn, name);
+                if atom == 0 {
+                    continue;
                 }
-                thread::sleep(POLL_INTERVAL);
+                match self.attempt_read_target(atom) {
+                    Ok(text) if !text.is_empty() => return Ok(text),
+                    Ok(_) => continue,
+                    Err(error) => last_err = Some(error),
+                }
             }
-
-            Err(BackendError::Protocol("selection timeout".into()))
+            Err(last_err.unwrap_or_else(|| {
+                BackendError::Protocol("no readable text target on selection".into())
+            }))
         }
 
-        fn request_selection_conversion(&self) -> Result<(), BackendError> {
+        fn attempt_read_target(&self, target_atom: Atom) -> Result<String, BackendError> {
             self.conn
                 .convert_selection(
                     self.owner_window,
                     self.clipboard_atom,
-                    self.utf8_string_atom,
+                    target_atom,
                     self.ccvv_prop_atom,
                     x11rb::CURRENT_TIME,
                 )
                 .map_err(|e| BackendError::Protocol(e.to_string()))?;
             self.conn
                 .flush()
-                .map_err(|e| BackendError::Protocol(e.to_string()))
+                .map_err(|e| BackendError::Protocol(e.to_string()))?;
+
+            let deadline = std::time::Instant::now() + SELECTION_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                if let Some(notify) = self.poll_selection_notify()? {
+                    // Stale SelectionNotify from a prior attempt may be queued;
+                    // only accept the one matching the current target.
+                    if notify.target == target_atom {
+                        return self.handle_selection_notify(notify);
+                    }
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+            Err(BackendError::Protocol("selection timeout".into()))
+        }
+
+        fn try_read_html(&self) -> Option<String> {
+            if !self.is_connected() {
+                return None;
+            }
+            let html_atom = Self::intern_atom(&self.conn, b"text/html");
+            if html_atom == 0 {
+                return None;
+            }
+
+            if self
+                .conn
+                .convert_selection(
+                    self.owner_window,
+                    self.clipboard_atom,
+                    html_atom,
+                    self.ccvv_prop_atom,
+                    x11rb::CURRENT_TIME,
+                )
+                .is_err()
+            {
+                return None;
+            }
+            let _ = self.conn.flush();
+
+            let deadline = std::time::Instant::now() + SELECTION_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                match self.conn.poll_for_event() {
+                    Ok(Some(Event::SelectionNotify(notify))) => {
+                        if u32::from(notify.property) == 0 {
+                            return None;
+                        }
+                        let prop = self
+                            .get_property_reply(true, self.owner_window, self.ccvv_prop_atom)
+                            .ok()?;
+                        if prop.value.len() > crate::clipboard::html::MAX_HTML_BYTES {
+                            return None;
+                        }
+                        let html = String::from_utf8_lossy(&prop.value).into_owned();
+                        return crate::clipboard::html::extract_plain_text_from_html(&html)
+                            .ok()
+                            .map(|_| html);
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => thread::sleep(POLL_INTERVAL),
+                    Err(_) => return None,
+                }
+            }
+            None
         }
 
         fn poll_selection_notify(&self) -> Result<Option<SelectionNotifyEvent>, BackendError> {
@@ -330,17 +408,26 @@ mod real {
     }
 
     #[derive(Debug)]
+    pub(super) enum OwnershipState {
+        Listening,
+        Owning { data: Vec<u8>, timestamp: u32 },
+    }
+
+    #[derive(Debug)]
     struct X11SelectionOwner {
         conn: RustConnection,
         owner_window: Window,
         clipboard_atom: Atom,
         targets_atom: Atom,
         utf8_string_atom: Atom,
+        text_atom: Atom,
+        string_atom: Atom,
+        text_plain_utf8_atom: Atom,
         incr_atom: Atom,
         clipboard_manager_atom: Atom,
         save_targets_atom: Atom,
         has_clipboard_manager: bool,
-        pending_write: Option<Vec<u8>>,
+        ownership: OwnershipState,
     }
 
     impl X11SelectionOwnerHandle {
@@ -418,6 +505,9 @@ mod real {
             let clipboard_atom = X11Backend::intern_atom(&conn, b"CLIPBOARD");
             let targets_atom = X11Backend::intern_atom(&conn, b"TARGETS");
             let utf8_string_atom = X11Backend::intern_atom(&conn, b"UTF8_STRING");
+            let text_atom = X11Backend::intern_atom(&conn, b"TEXT");
+            let string_atom = X11Backend::intern_atom(&conn, b"STRING");
+            let text_plain_utf8_atom = X11Backend::intern_atom(&conn, b"text/plain;charset=utf-8");
             let incr_atom = X11Backend::intern_atom(&conn, b"INCR");
             let clipboard_manager_atom = X11Backend::intern_atom(&conn, b"CLIPBOARD_MANAGER");
             let save_targets_atom = X11Backend::intern_atom(&conn, b"SAVE_TARGETS");
@@ -444,11 +534,14 @@ mod real {
                 clipboard_atom,
                 targets_atom,
                 utf8_string_atom,
+                text_atom,
+                string_atom,
+                text_plain_utf8_atom,
                 incr_atom,
                 clipboard_manager_atom,
                 save_targets_atom,
                 has_clipboard_manager,
-                pending_write: None,
+                ownership: OwnershipState::Listening,
             })
         }
 
@@ -467,7 +560,7 @@ mod real {
                     Ok(Some(event)) => match event {
                         Event::SelectionRequest(req) => self.handle_selection_request(&req),
                         Event::SelectionClear(_) => {
-                            self.pending_write = None;
+                            self.ownership = OwnershipState::Listening;
                         }
                         _ => {}
                     },
@@ -478,7 +571,7 @@ mod real {
         }
 
         fn offer_text(&mut self, text: String) -> Result<(), BackendError> {
-            self.pending_write = Some(text.into_bytes());
+            let data = text.into_bytes();
             self.conn
                 .set_selection_owner(self.owner_window, self.clipboard_atom, x11rb::CURRENT_TIME)
                 .map_err(|e| BackendError::Protocol(e.to_string()))?;
@@ -494,10 +587,14 @@ mod real {
                 .map_err(|e| BackendError::Protocol(e.to_string()))?;
 
             if owner.owner != self.owner_window {
+                self.ownership = OwnershipState::Listening;
                 return Err(BackendError::Protocol(
                     "failed to acquire clipboard ownership".into(),
                 ));
             }
+
+            let timestamp = self.capture_server_timestamp();
+            self.ownership = OwnershipState::Owning { data, timestamp };
 
             if self.has_clipboard_manager && self.save_targets_atom != 0 {
                 let _ = self.conn.convert_selection(
@@ -513,14 +610,66 @@ mod real {
             Ok(())
         }
 
+        fn capture_server_timestamp(&self) -> u32 {
+            let _ = self.conn.change_window_attributes(
+                self.owner_window,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::PROPERTY_CHANGE),
+            );
+            // Trigger a PropertyNotify by setting an empty property
+            let _ = self.conn.change_property(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                self.owner_window,
+                self.targets_atom,
+                AtomEnum::ATOM,
+                32,
+                0,
+                &[],
+            );
+            let _ = self.conn.flush();
+
+            let deadline = std::time::Instant::now() + Duration::from_millis(100);
+            let mut timestamp = 0;
+            while std::time::Instant::now() < deadline {
+                match self.conn.poll_for_event() {
+                    Ok(Some(Event::PropertyNotify(notify))) => {
+                        timestamp = notify.time;
+                        break;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => thread::sleep(Duration::from_millis(5)),
+                    Err(_) => break,
+                }
+            }
+
+            // Clean up: disable property-change events and delete the temp property
+            let _ = self.conn.change_window_attributes(
+                self.owner_window,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::NO_EVENT),
+            );
+            let _ = self
+                .conn
+                .delete_property(self.owner_window, self.targets_atom);
+            let _ = self.conn.flush();
+
+            timestamp
+        }
+
         fn handle_selection_request(&self, req: &SelectionRequestEvent) {
-            let data = match &self.pending_write {
-                Some(d) => d,
-                None => {
+            let (data, ownership_timestamp) = match &self.ownership {
+                OwnershipState::Owning { data, timestamp } => (data, *timestamp),
+                OwnershipState::Listening => {
                     self.send_selection_notify(req, 0u32.into());
                     return;
                 }
             };
+
+            // Reject stale requests outside the ownership interval (ICCCM §2.6.2)
+            if req.time != 0 && ownership_timestamp != 0 && req.time < ownership_timestamp {
+                self.send_selection_notify(req, 0u32.into());
+                return;
+            }
 
             // If requestor did not specify a property, use the target atom
             let property = if u32::from(req.property) == 0 {
@@ -531,21 +680,35 @@ mod real {
 
             if req.target == self.targets_atom {
                 // Respond with our supported TARGETS list
-                let targets_raw: Vec<u8> = [self.targets_atom, self.utf8_string_atom]
+                let target_atoms = [
+                    self.targets_atom,
+                    self.utf8_string_atom,
+                    self.text_atom,
+                    self.string_atom,
+                    self.text_plain_utf8_atom,
+                ];
+                let targets_raw: Vec<u8> = target_atoms
                     .iter()
+                    .filter(|a| **a != 0)
                     .flat_map(|a| a.to_ne_bytes())
                     .collect();
+                let atom_count = targets_raw.len() / 4;
                 let _ = self.conn.change_property(
                     x11rb::protocol::xproto::PropMode::REPLACE,
                     req.requestor,
                     property,
                     AtomEnum::ATOM,
                     32,
-                    2,
+                    atom_count as u32,
                     &targets_raw,
                 );
                 self.send_selection_notify(req, property);
-            } else if req.target == self.utf8_string_atom {
+            } else if req.target == self.utf8_string_atom
+                || req.target == self.text_atom
+                || req.target == self.string_atom
+                || req.target == self.text_plain_utf8_atom
+            {
+                // All text targets serve the same UTF-8 bytes
                 if data.len() > INCR_THRESHOLD {
                     self.send_incr_to_requestor(req, property, data);
                 } else {
@@ -721,6 +884,7 @@ mod real {
 
         fn read_snapshot(&mut self) -> Result<ClipboardSnapshot, BackendError> {
             let text = self.read_selection_text()?;
+            let acquired_html = self.try_read_html();
             let is_self_write = take_self_write_flag(&self.self_write_text, &text);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -731,7 +895,7 @@ mod real {
                 seat_id: "x11".to_string(),
                 selection_kind: SelectionKind::Clipboard,
                 acquired_plain_text: text,
-                acquired_html: None,
+                acquired_html,
                 timestamp: now,
                 backend_serial: None,
                 is_self_write,
@@ -834,9 +998,13 @@ mod real {
                     ccvv_prop,
                 );
 
-                let Some(snapshot) =
-                    Self::read_watch_snapshot(&conn, watch_window, ccvv_prop, &self_write_text)
-                else {
+                let Some(snapshot) = Self::read_watch_snapshot(
+                    &conn,
+                    watch_window,
+                    clipboard_atom,
+                    ccvv_prop,
+                    &self_write_text,
+                ) else {
                     continue;
                 };
 
@@ -866,6 +1034,7 @@ mod real {
         fn read_watch_snapshot(
             conn: &RustConnection,
             watch_window: Window,
+            clipboard_atom: Atom,
             ccvv_prop: Atom,
             self_write_text: &Arc<Mutex<Option<String>>>,
         ) -> Option<ClipboardSnapshot> {
@@ -877,6 +1046,7 @@ mod real {
                         return Self::build_watch_snapshot(
                             conn,
                             watch_window,
+                            clipboard_atom,
                             ccvv_prop,
                             self_write_text,
                         );
@@ -888,9 +1058,65 @@ mod real {
             None
         }
 
+        fn try_read_watch_html(
+            conn: &RustConnection,
+            watch_window: Window,
+            clipboard_atom: Atom,
+            ccvv_prop: Atom,
+        ) -> Option<String> {
+            let html_atom = Self::intern_atom(conn, b"text/html");
+            if html_atom == 0 {
+                return None;
+            }
+            conn.convert_selection(
+                watch_window,
+                clipboard_atom,
+                html_atom,
+                ccvv_prop,
+                x11rb::CURRENT_TIME,
+            )
+            .ok()?;
+            let _ = conn.flush();
+
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                match conn.poll_for_event() {
+                    Ok(Some(Event::SelectionNotify(notify))) => {
+                        if u32::from(notify.property) == 0 {
+                            return None;
+                        }
+                        let prop = conn
+                            .get_property(
+                                true,
+                                watch_window,
+                                ccvv_prop,
+                                AtomEnum::ANY,
+                                0,
+                                1024 * 1024,
+                            )
+                            .ok()?
+                            .reply()
+                            .ok()?;
+                        if prop.value.len() > crate::clipboard::html::MAX_HTML_BYTES {
+                            return None;
+                        }
+                        let html = String::from_utf8_lossy(&prop.value).into_owned();
+                        return crate::clipboard::html::extract_plain_text_from_html(&html)
+                            .ok()
+                            .map(|_| html);
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => thread::sleep(Duration::from_millis(10)),
+                    Err(_) => return None,
+                }
+            }
+            None
+        }
+
         fn build_watch_snapshot(
             conn: &RustConnection,
             watch_window: Window,
+            clipboard_atom: Atom,
             ccvv_prop: Atom,
             self_write_text: &Arc<Mutex<Option<String>>>,
         ) -> Option<ClipboardSnapshot> {
@@ -900,11 +1126,13 @@ mod real {
                 .reply()
                 .ok()?;
             let text = String::from_utf8_lossy(&prop.value).into_owned();
+            let acquired_html =
+                Self::try_read_watch_html(conn, watch_window, clipboard_atom, ccvv_prop);
             Some(ClipboardSnapshot {
                 seat_id: "x11".to_string(),
                 selection_kind: SelectionKind::Clipboard,
                 acquired_plain_text: text.clone(),
-                acquired_html: None,
+                acquired_html,
                 timestamp: current_timestamp_millis(),
                 backend_serial: None,
                 is_self_write: take_self_write_flag(self_write_text, &text),
@@ -1005,5 +1233,24 @@ mod tests {
         assert!(super::real::take_self_write_flag(&pending, "hello"));
         assert!(!super::real::take_self_write_flag(&pending, "hello"));
         assert!(!super::real::take_self_write_flag(&pending, "world"));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "x11"))]
+    #[test]
+    fn test_ownership_state_transitions() {
+        let listening = super::real::OwnershipState::Listening;
+        assert!(matches!(listening, super::real::OwnershipState::Listening));
+
+        let owning = super::real::OwnershipState::Owning {
+            data: b"hello".to_vec(),
+            timestamp: 12345,
+        };
+        match owning {
+            super::real::OwnershipState::Owning { data, timestamp } => {
+                assert_eq!(data, b"hello");
+                assert_eq!(timestamp, 12345);
+            }
+            _ => panic!("expected Owning state"),
+        }
     }
 }
