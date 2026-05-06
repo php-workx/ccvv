@@ -804,7 +804,6 @@ x11 = []
 wayland = []
 tray = []
 xembed = []
-html-extract = []
 ```
 
 Semantics:
@@ -813,7 +812,8 @@ Semantics:
 - `wayland`: compile Wayland backend
 - `tray`: compile SNI tray sidecar support
 - `xembed`: compile optional legacy tray helper
-- `html-extract`: compile HTML rich-text extraction
+
+Implementation note: an earlier draft listed an `html-extract` feature for HTML rich-text extraction. It was removed in implementation because HTML extraction (`core/ccvv-linux/src/clipboard/html.rs`) is small enough to ship unconditionally and the flag did not actually gate any runtime work. The acquisition layer still falls back to plain text whenever HTML is absent, oversized, or malformed.
 
 ### 11.3 System Dependencies
 

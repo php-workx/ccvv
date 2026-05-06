@@ -18,6 +18,14 @@ pub fn extract_plain_text_from_html(html: &str) -> Result<String, HtmlExtractErr
     let mut tag = String::new();
     let mut in_tag = false;
     let mut preserve_whitespace = false;
+    // Depth of nested inline-code-like tags (<code>, <kbd>, <samp>, <tt>) that
+    // are NOT inside a <pre>; while > 0, the surrounding output is wrapped
+    // in backticks so the resulting plain text keeps the inline-code hint.
+    // <pre> still owns whitespace preservation; <pre><code> does not double-wrap.
+    let mut inline_code_depth: u32 = 0;
+    // Depth of <pre> blocks. While > 0 we preserve whitespace and skip the
+    // inline backtick wrapping (block-level code preserves layout instead).
+    let mut pre_depth: u32 = 0;
 
     for character in html.chars() {
         match character {
@@ -32,12 +40,37 @@ pub fn extract_plain_text_from_html(html: &str) -> Result<String, HtmlExtractErr
                     .next()
                     .unwrap_or("")
                     .trim_end_matches('/');
-                if tag_name == "pre" || tag_name == "code" {
-                    preserve_whitespace = true;
-                } else if tag_name == "/pre" || tag_name == "/code" {
-                    preserve_whitespace = false;
-                } else if matches!(tag_name, "br" | "/p" | "p" | "/div" | "div") {
-                    push_newline(&mut output);
+                match tag_name {
+                    "pre" => {
+                        pre_depth = pre_depth.saturating_add(1);
+                        preserve_whitespace = true;
+                    }
+                    "/pre" => {
+                        pre_depth = pre_depth.saturating_sub(1);
+                        if pre_depth == 0 {
+                            preserve_whitespace = false;
+                        }
+                    }
+                    "code" | "kbd" | "samp" | "tt" => {
+                        if pre_depth == 0 {
+                            inline_code_depth = inline_code_depth.saturating_add(1);
+                            if inline_code_depth == 1 {
+                                output.push('`');
+                            }
+                        }
+                    }
+                    "/code" | "/kbd" | "/samp" | "/tt" => {
+                        if pre_depth == 0 && inline_code_depth > 0 {
+                            inline_code_depth -= 1;
+                            if inline_code_depth == 0 {
+                                output.push('`');
+                            }
+                        }
+                    }
+                    "br" | "/p" | "p" | "/div" | "div" => {
+                        push_newline(&mut output);
+                    }
+                    _ => {}
                 }
                 in_tag = false;
             }
@@ -189,5 +222,46 @@ mod tests {
             plain,
             "Before\nfn main() {\n    println!(\"hi\");\n}\nAfter"
         );
+    }
+
+    #[test]
+    fn test_inline_code_tag_wraps_in_backticks() {
+        let html = "Use <code>cargo build</code> to compile.";
+        let plain = extract_plain_text_from_html(html).unwrap();
+
+        assert_eq!(plain, "Use `cargo build` to compile.");
+    }
+
+    #[test]
+    fn test_inline_kbd_samp_tt_each_wrap_in_backticks() {
+        let html = "Press <kbd>Ctrl+C</kbd>; output <samp>OK</samp>; var <tt>FOO</tt>.";
+        let plain = extract_plain_text_from_html(html).unwrap();
+
+        assert_eq!(plain, "Press `Ctrl+C`; output `OK`; var `FOO`.");
+    }
+
+    #[test]
+    fn test_pre_code_does_not_double_wrap_in_backticks() {
+        // Block-level <pre><code> preserves whitespace and must NOT add inline
+        // backticks; the spec keeps backticks for inline use only.
+        let html = "<pre><code>fn main() {\n    foo();\n}</code></pre>";
+        let plain = extract_plain_text_from_html(html).unwrap();
+
+        assert!(
+            !plain.contains('`'),
+            "pre>code should not be wrapped in inline backticks; got: {plain:?}"
+        );
+        assert!(plain.contains("fn main() {"));
+        assert!(plain.contains("    foo();"));
+    }
+
+    #[test]
+    fn test_nested_inline_code_wraps_once() {
+        // Nested <code><kbd>x</kbd></code> should still produce a single backtick
+        // pair around the whole run, not two pairs.
+        let html = "<code><kbd>Ctrl+C</kbd></code>";
+        let plain = extract_plain_text_from_html(html).unwrap();
+
+        assert_eq!(plain, "`Ctrl+C`");
     }
 }

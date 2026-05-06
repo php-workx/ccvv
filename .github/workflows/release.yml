@@ -44,10 +44,11 @@ jobs:
           sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' core/ccvv-lib/Cargo.toml
           sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' core/ccvv-linux/Cargo.toml
 
-      - name: Build ccvv-linux
+      - name: Build ccvv-linux + ccvv CLI
         working-directory: core
         run: |
           cargo build --release --package ccvv-linux --bins --features tray --target ${{ matrix.target }}
+          cargo build --release --package ccvv-cli --target ${{ matrix.target }}
 
       - name: Render Linux packaging metadata
         run: |
@@ -66,6 +67,7 @@ jobs:
           mkdir -p "$DIST"
           cp "core/target/${TARGET}/release/ccvv-linux" "$DIST/"
           cp "core/target/${TARGET}/release/ccvv-tray-sni" "$DIST/"
+          cp "core/target/${TARGET}/release/ccvv" "$DIST/"
           cp linux/ccvv-linux.desktop "$DIST/"
           cp linux/ccvv-linux.service "$DIST/"
           cp linux/Makefile "$DIST/"

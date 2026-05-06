@@ -6,7 +6,13 @@ use ccvv_lib::AdaptiveTimingWindow;
 
 use crate::backend::{ClipboardSnapshot, SelectionKind};
 
+// Spec §7.2: Linux timing window default 400ms, configurable in [150, 600].
+// The clamp matters even when adaptive mode is enabled — if a user has only
+// ever copied very fast or very slow, we still keep the active window inside
+// the spec's human-tap range.
 const DEFAULT_TRIGGER_WINDOW_MS: u64 = 400;
+pub(crate) const MIN_TRIGGER_WINDOW_MS: u64 = 150;
+pub(crate) const MAX_TRIGGER_WINDOW_MS: u64 = 600;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DetectionOutcome {
@@ -23,17 +29,34 @@ struct SeatState {
     pub last_timestamp: Option<u64>,
     pub last_backend_serial: Option<u64>,
     pub adaptive_timing: AdaptiveTimingWindow,
+    pub last_source_kind: Option<SelectionKind>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct DetectorState {
     seats: HashMap<String, SeatState>,
     paused: bool,
+    /// When `Some`, a fixed double-tap window from config takes precedence
+    /// over per-seat adaptive timing (spec §7.2 "Config value takes
+    /// precedence (disables adaptive if fixed)").
+    fixed_window_ms: Option<u64>,
 }
 
 impl DetectorState {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a detector that honors a fixed double-tap window from config.
+    /// Pass `None` to enable adaptive timing. The value is clamped to the
+    /// Linux fixed-window range.
+    pub fn with_fixed_window_ms(window_ms: Option<u64>) -> Self {
+        Self {
+            fixed_window_ms: window_ms
+                .map(|ms| ms.clamp(MIN_TRIGGER_WINDOW_MS, MAX_TRIGGER_WINDOW_MS)),
+            ..Self::default()
+        }
     }
 
     #[allow(dead_code)]
@@ -66,11 +89,11 @@ impl DetectorState {
         {
             if previous_hash == current_hash {
                 let interval = snapshot.timestamp.saturating_sub(previous_timestamp);
-                let active_window = seat_state
-                    .adaptive_timing
-                    .threshold_ms()
-                    .map(u64::from)
-                    .unwrap_or(DEFAULT_TRIGGER_WINDOW_MS);
+                let active_window = self
+                    .fixed_window_ms
+                    .or_else(|| seat_state.adaptive_timing.threshold_ms().map(u64::from))
+                    .unwrap_or(DEFAULT_TRIGGER_WINDOW_MS)
+                    .clamp(MIN_TRIGGER_WINDOW_MS, MAX_TRIGGER_WINDOW_MS);
                 if interval <= active_window {
                     let clamped = u32::try_from(interval).unwrap_or(u32::MAX);
                     seat_state.adaptive_timing.record_sample(clamped);
@@ -86,6 +109,7 @@ impl DetectorState {
         seat_state.last_hash = Some(current_hash);
         seat_state.last_timestamp = Some(snapshot.timestamp);
         seat_state.last_backend_serial = snapshot.backend_serial;
+        seat_state.last_source_kind = Some(snapshot.selection_kind.clone());
         outcome
     }
 }
@@ -154,6 +178,47 @@ mod tests {
         state.resume();
         assert_eq!(
             state.observe(&snapshot("hello", 120, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TrackedFirstCopy
+        );
+    }
+
+    #[test]
+    fn test_fixed_window_from_config_takes_precedence_over_adaptive() {
+        // Even after many fast samples (which would push adaptive threshold
+        // very low), a fixed window from config governs the active window.
+        let mut state = DetectorState::with_fixed_window_ms(Some(450));
+        for _ in 0..20 {
+            state
+                .seats
+                .entry("seat0".to_string())
+                .or_default()
+                .adaptive_timing
+                .record_sample(50);
+        }
+
+        assert_eq!(
+            state.observe(&snapshot("hello", 100, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TrackedFirstCopy
+        );
+        // Interval 400ms should still trigger because fixed window is 450.
+        assert_eq!(
+            state.observe(&snapshot("hello", 500, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TriggeredClean
+        );
+    }
+
+    #[test]
+    fn test_fixed_window_clamped_to_linux_range() {
+        // Ridiculously high config value gets clamped to MAX (600ms);
+        // a 700ms gap should NOT trigger.
+        let mut state = DetectorState::with_fixed_window_ms(Some(2_000));
+
+        assert_eq!(
+            state.observe(&snapshot("hello", 100, false, SelectionKind::Clipboard)),
+            DetectionOutcome::TrackedFirstCopy
+        );
+        assert_eq!(
+            state.observe(&snapshot("hello", 800, false, SelectionKind::Clipboard)),
             DetectionOutcome::TrackedFirstCopy
         );
     }

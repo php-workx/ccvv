@@ -80,7 +80,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxfixes-dev libwayland-dev xvfb
       - name: Run Linux daemon tests with planned feature set
         working-directory: core
-        run: cargo test -p ccvv-linux --features x11,wayland,tray,html-extract -- --nocapture
+        run: cargo test -p ccvv-linux --features x11,wayland,tray -- --nocapture
 
   linux-x11-integration:
     name: Linux X11 Integration
@@ -184,6 +184,9 @@ jobs:
           grep -q 'ccvv-tray-sni' linux/PKGBUILD
           grep -q 'ccvv-tray-sni' linux/ccvv-linux.spec
           grep -q 'ccvv-tray-sni' linux/ccvv-linux.control
+          # Spec §10.6 also requires the ccvv CLI binary to ship with Linux.
+          grep -q '/usr/bin/ccvv\b' linux/PKGBUILD
+          grep -q '%{_bindir}/ccvv\b' linux/ccvv-linux.spec
 
   deny:
     name: Cargo Deny

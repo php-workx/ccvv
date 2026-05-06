@@ -12,6 +12,7 @@ sha256sums=('SKIP')
 package() {
   install -Dm755 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-linux" "$pkgdir/usr/bin/ccvv-linux"
   install -Dm755 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-tray-sni" "$pkgdir/usr/bin/ccvv-tray-sni"
+  install -Dm755 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv" "$pkgdir/usr/bin/ccvv"
   install -Dm644 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-linux.desktop" "$pkgdir/etc/xdg/autostart/ccvv.desktop"
   install -Dm644 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-linux.service" "$pkgdir/usr/lib/systemd/user/ccvv.service"
 }

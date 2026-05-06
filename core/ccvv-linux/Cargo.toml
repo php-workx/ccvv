@@ -7,12 +7,14 @@ rust-version.workspace = true
 default-run = "ccvv-linux"
 
 [features]
-default = ["x11", "wayland", "tray", "html-extract"]
+default = ["x11", "wayland", "tray"]
 x11 = ["dep:x11rb"]
 wayland = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "dep:wl-clipboard-rs"]
 tray = ["dep:ksni"]
 xembed = []
-html-extract = []
+# Note: HTML rich-text extraction (clipboard/html.rs) is always compiled. The
+# earlier `html-extract` feature flag was a no-op gate and was removed to
+# avoid suggesting a build-time toggle that did not actually exist.
 
 [[bin]]
 name = "ccvv-linux"

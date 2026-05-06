@@ -16,11 +16,13 @@ ccvv-linux runs the ccvv clipboard sanitizer as a user-session daemon on Linux.
 %install
 install -Dpm0755 ccvv-linux %{buildroot}%{_bindir}/ccvv-linux
 install -Dpm0755 ccvv-tray-sni %{buildroot}%{_bindir}/ccvv-tray-sni
+install -Dpm0755 ccvv %{buildroot}%{_bindir}/ccvv
 install -Dpm0644 ccvv-linux.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/ccvv.desktop
 install -Dpm0644 ccvv-linux.service %{buildroot}%{_userunitdir}/ccvv.service
 
 %files
 %{_bindir}/ccvv-linux
 %{_bindir}/ccvv-tray-sni
+%{_bindir}/ccvv
 %config(noreplace) %{_sysconfdir}/xdg/autostart/ccvv.desktop
 %{_userunitdir}/ccvv.service
