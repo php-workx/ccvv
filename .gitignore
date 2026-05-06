@@ -7,6 +7,9 @@ core/target/
 # AgentOps session artifacts
 .agents/
 
+# epos ticket session locks (not the tickets themselves)
+.tickets/*.lock
+
 .env
 .DS_STORE
 .beta-counter
