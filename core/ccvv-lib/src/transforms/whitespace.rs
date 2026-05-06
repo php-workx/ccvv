@@ -325,14 +325,59 @@ pub fn compact_paragraph(lines: &[ParagraphLine]) -> String {
 pub fn compact_paragraph_with_width(lines: &[ParagraphLine], terminal_width: usize) -> String {
     let joined = join_shell_continuations(lines);
     let lines = &joined;
-    let mut state = CompactState::new(lines);
+    let base_indent = lines.iter().map(|l| l.indent).min().unwrap_or(0);
+    let effective_bullet_indents = compute_effective_bullet_indents(lines, base_indent);
+    let mut state = CompactState::new(base_indent, effective_bullet_indents);
 
-    for entry in lines {
+    for (idx, entry) in lines.iter().enumerate() {
         let relative_indent = entry.indent.saturating_sub(state.base_indent);
-        state.process_line(entry, relative_indent, terminal_width);
+        state.process_line(idx, entry, relative_indent, terminal_width);
     }
 
     state.finish()
+}
+
+/// Decide effective relative indent for each list-item line.
+///
+/// A sub-bullet (relative_indent > 0) keeps its indent only if a *later*
+/// list item exists at strictly smaller relative indent — that closer
+/// signals genuine nesting. Without a closer, the indent is treated as a
+/// word-wrap artifact and the bullet is promoted to the paragraph base.
+fn compute_effective_bullet_indents(
+    lines: &[ParagraphLine],
+    base_indent: usize,
+) -> std::collections::HashMap<usize, usize> {
+    let bullets: Vec<(usize, usize)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| is_list_item(&line.text))
+        .map(|(i, line)| (i, line.indent.saturating_sub(base_indent)))
+        .collect();
+
+    let mut effective = std::collections::HashMap::new();
+    for (slot, &(idx, rel)) in bullets.iter().enumerate() {
+        if rel == 0 {
+            effective.insert(idx, 0);
+            continue;
+        }
+        // Parent indent = largest indent < rel among preceding bullets.
+        // No parent → these are a sub-list under prose, not a nested
+        // bullet group; leave the indent alone.
+        let parent_rel = bullets[..slot]
+            .iter()
+            .map(|&(_, r)| r)
+            .filter(|&r| r < rel)
+            .max();
+        let Some(parent_rel) = parent_rel else {
+            effective.insert(idx, rel);
+            continue;
+        };
+        let has_closer = bullets[slot + 1..]
+            .iter()
+            .any(|&(_, later_rel)| later_rel <= parent_rel);
+        effective.insert(idx, if has_closer { rel } else { parent_rel });
+    }
+    effective
 }
 
 /// Mutable state for paragraph compaction, extracted to reduce cognitive
@@ -346,31 +391,40 @@ struct CompactState {
     /// When a continuation at indent C joins a list item at indent L (C > L),
     /// subsequent list items at indent C are promoted to indent L.
     promoted_indents: std::collections::HashMap<usize, usize>,
+    /// Pre-computed effective relative indent per entry index. Bullets without
+    /// a "closer" at lower indent are promoted to the paragraph base here.
+    effective_bullet_indents: std::collections::HashMap<usize, usize>,
 }
 
 impl CompactState {
-    fn new(lines: &[ParagraphLine]) -> Self {
+    fn new(
+        base_indent: usize,
+        effective_bullet_indents: std::collections::HashMap<usize, usize>,
+    ) -> Self {
         Self {
             output_lines: Vec::new(),
             buffer: String::new(),
             last_buffer_raw_len: 0,
-            base_indent: lines.iter().map(|l| l.indent).min().unwrap_or(0),
+            base_indent,
             last_list_item_rel_indent: 0,
             promoted_indents: std::collections::HashMap::new(),
+            effective_bullet_indents,
         }
     }
 
     fn process_line(
         &mut self,
+        entry_index: usize,
         entry: &ParagraphLine,
         relative_indent: usize,
         terminal_width: usize,
     ) {
         if is_list_item(&entry.text) {
             let effective_indent = self
-                .promoted_indents
-                .get(&relative_indent)
+                .effective_bullet_indents
+                .get(&entry_index)
                 .copied()
+                .or_else(|| self.promoted_indents.get(&relative_indent).copied())
                 .unwrap_or(relative_indent);
             self.flush_buffer();
             self.last_list_item_rel_indent = effective_indent;
@@ -794,13 +848,45 @@ mod tests {
 
     #[test]
     fn test_genuine_nested_list_preserved() {
-        // Genuine nesting (no continuation before sub-bullets) should be preserved.
-        let input = "- Top level item\n  - Nested item 1\n  - Nested item 2";
+        // Nesting is preserved when a root-level bullet "closes" the
+        // sub-section (here: the trailing root bullet at the end).
+        let input = "- Top level item\n  - Nested item 1\n  - Nested item 2\n- Another root";
         let result = ccvv(input);
         assert_eq!(
             result,
-            "- Top level item\n  - Nested item 1\n  - Nested item 2"
+            "- Top level item\n  - Nested item 1\n  - Nested item 2\n- Another root"
         );
+    }
+
+    #[test]
+    fn test_sub_bullets_without_root_closer_are_promoted() {
+        // No bullet at root level after the sub-bullets — the indent is a
+        // word-wrap artifact, not real nesting. Promote everything to root.
+        let input = "- First item\n  - Looks nested 1\n  - Looks nested 2";
+        let result = ccvv(input);
+        assert_eq!(result, "- First item\n- Looks nested 1\n- Looks nested 2");
+    }
+
+    #[test]
+    fn test_sub_bullets_with_continuations_promoted_when_no_root_closer() {
+        // Reproduces the bug: three bullets where the last two are indented +
+        // each has a wrapped continuation line. With no root-level closer,
+        // promote to root and join continuations into their bullets.
+        let input = "- Add Qwen3 GPU snapshot restore for faster cold starts on voice TTS\n  - Add blue/green deployment with safer cutover, rollback warmup, and inactive-slot\n  scale-down\n  - Improve load testing with per-turn voice swaps, cold-start controls, audio-only\n  first-response timing, and clearer reports";
+        let result = ccvv(input);
+        assert_eq!(
+            result,
+            "- Add Qwen3 GPU snapshot restore for faster cold starts on voice TTS\n- Add blue/green deployment with safer cutover, rollback warmup, and inactive-slot scale-down\n- Improve load testing with per-turn voice swaps, cold-start controls, audio-only first-response timing, and clearer reports"
+        );
+    }
+
+    #[test]
+    fn test_sub_bullets_with_root_closer_keep_nesting() {
+        // Same shape as above, but with a trailing root bullet — the
+        // sub-bullets are now genuine nesting and must keep their indent.
+        let input = "- Root one\n  - Sub one\n  - Sub two\n- Root two";
+        let result = ccvv(input);
+        assert_eq!(result, "- Root one\n  - Sub one\n  - Sub two\n- Root two");
     }
 
     #[test]
