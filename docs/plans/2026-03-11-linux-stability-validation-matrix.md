@@ -11,10 +11,10 @@ Rollout rule:
 
 | Field | Value |
 |---|---|
-| Build SHA | |
-| Validation date | |
-| Tester | |
-| Notes | |
+| Build SHA | not yet executed against any tagged build |
+| Validation date | pending |
+| Tester | pending — must be a human on a real Linux desktop session |
+| Notes | Automated regression suite + CI gate already green at 05d8afb (2026-05-06). This matrix is the *human* half of the gate and cannot be filled from CI: it requires copying real content (browser, terminal, IDE, PDF reader, mail client) on each compositor and recording the outcome row by row. |
 
 ## Environment Matrix
 

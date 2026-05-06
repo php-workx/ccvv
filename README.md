@@ -156,10 +156,10 @@ Linux rollout status: `technical beta` for Linux power users.
 
 Broad external rollout stays blocked until the Linux stability gate is complete:
 
-1. Regression coverage for the high-risk copy/detect/format flows is in place.
-2. Linux CI is green, including the headless wlroots Wayland stability harness.
-3. The manual validation matrix is filled for X11, wlroots Wayland, and GNOME Wayland limited mode.
-4. A short internal soak completes without copy/content/formatting regressions.
+1. ✅ Regression coverage for the high-risk copy/detect/format flows is in place — all 10 named scenarios from the hardening plan map to specific tests, audited at 05d8afb (2026-05-06).
+2. ✅ Linux CI is green, including the headless wlroots Wayland stability harness — the `linux-x11-integration`, `linux-gnome-limited`, and `linux-wayland-harness` jobs in `.github/workflows/pr-checks.yml` all run on every PR.
+3. ⏳ The manual validation matrix is filled for X11, wlroots Wayland, and GNOME Wayland limited mode — pending a human session on each compositor.
+4. ⏳ A short internal soak completes without copy/content/formatting regressions — pending at least 3 calendar days of active dogfooding.
 
 The current validation template lives in `docs/plans/2026-03-11-linux-stability-validation-matrix.md`.
 

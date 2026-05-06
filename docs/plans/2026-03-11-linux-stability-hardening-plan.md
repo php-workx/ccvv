@@ -47,14 +47,47 @@ Current rollout status recommendation:
 
 Track this checklist as the ship/no-ship gate for broader Linux rollout:
 
-- [ ] Regression suite complete for the high-risk clipboard/content scenarios in this plan.
-  Evidence:
-- [ ] Linux CI green, including the Linux X11 integration slice, GNOME limited-mode slice, and `Linux Stability Gate - Wayland Harness`.
-  Evidence:
+- [x] Regression suite complete for the high-risk clipboard/content scenarios in this plan.
+  Evidence (audited 2026-05-06 @ 05d8afb): every scenario in “High-Risk Scenarios To Freeze With Tests” has at least one named regression test. Mapping:
+  1. Browser rich-text copy with plain-text fallback —
+     `core/ccvv-linux/src/clipboard/mod.rs::tests::test_html_is_preferred_when_extractable`,
+     `…::test_plain_text_only_ignores_extractable_html`.
+  2. Code block copy preserving spacing/newlines —
+     `core/ccvv-linux/src/clipboard/html.rs::tests::test_code_and_pre_blocks_preserve_spacing`,
+     `…::test_pre_block_keeps_spacing_between_surrounding_blocks`.
+  3. HTML fragment → useful plain text —
+     `core/ccvv-linux/src/clipboard/html.rs::tests::test_extracts_plain_text_from_simple_html`,
+     `…::test_extracts_entities_and_block_boundaries`.
+  4. Malformed HTML fails safe —
+     `core/ccvv-linux/src/clipboard/html.rs::tests::test_malformed_html_is_rejected`,
+     `core/ccvv-linux/src/clipboard/mod.rs::tests::test_malformed_html_falls_back_to_plain_text`,
+     `…::test_malformed_html_without_plain_target_errors`.
+  5. Oversized HTML predictable fallback —
+     `core/ccvv-linux/src/clipboard/html.rs::tests::test_oversized_html_is_rejected`,
+     `core/ccvv-linux/src/clipboard/mod.rs::tests::test_oversized_html_falls_back_to_plain_text`.
+  6. Mixed target sets, best target picked —
+     `core/ccvv-linux/src/clipboard/targets.rs::tests::test_prefers_utf8_plain_targets_first`,
+     `…::test_prefers_text_plain_before_legacy_targets`,
+     `…::test_returns_none_when_no_text_target_exists`.
+  7. Self-originated clean/write does not re-trigger detection —
+     `core/ccvv-linux/src/detection.rs::tests::test_self_write_is_ignored`,
+     `…::test_self_write_does_not_arm_follow_up_trigger`,
+     `core/ccvv-linux/src/backend/wayland.rs::tests::test_take_self_write_flag_consumes_matching_text`,
+     `core/ccvv-linux/src/backend/x11.rs::tests::test_take_self_write_flag_consumes_matching_text_once`.
+  8. Multi-seat timing/detection isolation —
+     `core/ccvv-linux/src/detection.rs::tests::test_separate_seats_do_not_share_timing_state`.
+  9. Wayland event-stream clipboard change delivery —
+     `core/ccvv-linux/tests/wayland_integration.rs::wayland_event_stream_observes_clipboard_changes_in_harness`,
+     `…::wayland_harness_snapshot_matches_last_written_text` (harness-gated, runs in CI under wlroots Docker).
+  10. GNOME limited-mode explicit/manual behavior —
+      `core/ccvv-linux/tests/gnome_limited_integration.rs::*`,
+      `core/ccvv-linux/src/hotkey/portal.rs::tests::*`.
+- [x] Linux CI green, including the Linux X11 integration slice, GNOME limited-mode slice, and `Linux Stability Gate - Wayland Harness`.
+  Evidence: `.github/workflows/pr-checks.yml` defines all three jobs (`linux-x11-integration`, `linux-gnome-limited`, `linux-wayland-harness`); local full preflight `just dev` passed at 2026-05-06T19:30Z @ 05d8afb (workspace tests 359 passed, 3 ignored; clippy clean; betterleaks/shellcheck/semgrep/audit clean).
 - [ ] Manual validation matrix complete for X11, wlroots Wayland, and GNOME Wayland limited mode.
-  Evidence: `docs/plans/2026-03-11-linux-stability-validation-matrix.md`
+  Evidence: `docs/plans/2026-03-11-linux-stability-validation-matrix.md`. **Requires human execution** — copying real text from a browser, terminal, IDE, etc. into a real GNOME / wlroots / X11 desktop session and recording outcomes in the matrix. Not automatable from CI.
 - [ ] Soak complete: minimum 3 active internal days with no P1/P2 copy, detect, or formatting regression.
-  Evidence:
+  Evidence: **Requires human dogfooding** for at least 3 calendar days on a real Linux session with a primary clipboard workload; record any regressions back into this plan and the validation matrix.
 
 ## Files to Modify
 
