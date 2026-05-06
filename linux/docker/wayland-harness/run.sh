@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname "$0")/../../.." && pwd)
 image_name="${CCVV_WAYLAND_HARNESS_IMAGE:-ccvv-wayland-harness}"
 
 docker build -t "$image_name" -f "$repo_root/linux/docker/wayland-harness/Dockerfile" "$repo_root"

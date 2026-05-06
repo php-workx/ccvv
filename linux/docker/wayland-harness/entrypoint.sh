@@ -26,6 +26,9 @@ if [ "$(id -u)" -eq 0 ]; then
     /usr/local/bin/wayland-harness-entrypoint "$@"
 fi
 
+# Variables inside the single-quoted block are intentionally expanded
+# inside the child shell, after we've exported them above.
+# shellcheck disable=SC2016
 dbus-run-session -- sh -eu -c '
   sway --unsupported-gpu -c /etc/ccvv/sway.conf >/tmp/ccvv-sway.log 2>&1 &
   sway_pid=$!

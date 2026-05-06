@@ -1,0 +1,13 @@
+# Pre-existing findings in git history that are not real secrets.
+# Each line is a betterleaks fingerprint (commit:file:rule:line).
+
+# `admin:admin` is the SonarQube default bootstrap credential used only
+# inside the local-only `just sonar-setup` recipe; not a deployed secret.
+77511cf5ffa5db4ffa1449557377ae36431bcc72:justfile:curl-auth-user:167
+77511cf5ffa5db4ffa1449557377ae36431bcc72:justfile:curl-auth-user:169
+77511cf5ffa5db4ffa1449557377ae36431bcc72:justfile:curl-auth-user:170
+
+# Synthetic JWT fixture used by SecretFilter tests to verify that the
+# pipeline's sensitive-content guard fires on JWT-shaped strings.
+03ab6fef24c633d5e60d5fd2a5b3ac8da3e57e65:core/ccvv-lib/tests/integration.rs:jwt:218
+627f2c9ae40516c09cc4e4ddad47e1c38d58904b:core/ccvv-lib/src/secrets.rs:jwt:70
