@@ -4,6 +4,7 @@ Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: ccvv maintainers <opensource@ccvv.invalid>
+Depends: libc6, libgcc-s1, libx11-6, libxfixes3, libwayland-client0, dbus-user-session | dbus
 Description: Clipboard sanitizer daemon for Linux desktops
  ccvv-linux runs the ccvv clipboard sanitizer as a user-session daemon on
  Linux desktops, ships the ccvv-tray-sni sidecar, and installs XDG autostart

@@ -1,6 +1,6 @@
 [Unit]
 Description=ccvv clipboard sanitizer daemon
-Documentation=https://github.com/runger/ccvv
+Documentation=https://github.com/php-workx/ccvv
 After=graphical-session.target
 
 [Service]

@@ -3,10 +3,10 @@ pkgver=@@VERSION@@
 pkgrel=1
 pkgdesc="Clipboard sanitizer daemon for Linux desktops"
 arch=('x86_64')
-url="https://github.com/runger/ccvv"
+url="https://github.com/php-workx/ccvv"
 license=('MIT')
-depends=('glibc')
-source=("https://github.com/runger/ccvv/releases/download/v${pkgver}/ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+depends=('glibc' 'gcc-libs' 'libx11' 'libxfixes' 'wayland' 'dbus')
+source=("https://github.com/php-workx/ccvv/releases/download/v${pkgver}/ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
 sha256sums=('SKIP')
 
 package() {
@@ -15,4 +15,5 @@ package() {
   install -Dm755 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv" "$pkgdir/usr/bin/ccvv"
   install -Dm644 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-linux.desktop" "$pkgdir/etc/xdg/autostart/ccvv.desktop"
   install -Dm644 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu/ccvv-linux.service" "$pkgdir/usr/lib/systemd/user/ccvv.service"
+  install -Dm644 "ccvv-linux-${pkgver}-x86_64-unknown-linux-gnu"/icons/*.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
 }
