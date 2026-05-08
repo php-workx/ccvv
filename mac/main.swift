@@ -452,10 +452,8 @@ func shouldWrapCodeToken(_ token: String) -> Bool {
     if token.range(of: #"^[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,8}(:\d+)?$"#, options: .regularExpression) != nil {
         return true
     }
-    if token.range(of: #"^[A-Za-z]+[A-Z][A-Za-z0-9]*$"#, options: .regularExpression) != nil {
-        return true
-    }
-    if token.range(of: #"^[A-Z][A-Z0-9_]{2,}$"#, options: .regularExpression) != nil {
+    if token.range(of: #"^[A-Za-z][A-Za-z0-9]*$"#, options: .regularExpression) != nil,
+       token.range(of: #"[a-z][A-Z]"#, options: .regularExpression) != nil {
         return true
     }
     return false
@@ -521,7 +519,35 @@ func wrapInBackticks(_ text: String) -> String {
     }
 
     guard start < end else { return text }
-    return String(text[..<start]) + "`" + String(text[start..<end]) + "`" + String(text[end...])
+    let core = String(text[start..<end])
+    guard shouldWrapCodeSpan(core) else { return text }
+    return String(text[..<start]) + "`" + core + "`" + String(text[end...])
+}
+
+func shouldWrapCodeSpan(_ text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return false }
+    if trimmed.range(of: #"\s"#, options: .regularExpression) == nil {
+        return shouldWrapCodeToken(trimmed)
+    }
+    return isLikelyCommandSpan(trimmed)
+}
+
+func isLikelyCommandSpan(_ text: String) -> Bool {
+    let tokens = text.split(whereSeparator: { $0.isWhitespace })
+    guard let first = tokens.first else { return false }
+    let command = String(first)
+    if command.hasPrefix("./") || command.hasPrefix("../") || command.hasPrefix("/") {
+        return true
+    }
+
+    let commonCommands = [
+        "awk", "brew", "cargo", "cat", "ccvv", "ccvv-linux", "cd", "chmod",
+        "cp", "curl", "docker", "gh", "git", "grep", "jq", "just", "kubectl",
+        "make", "mkdir", "mv", "node", "npm", "npx", "pnpm", "python",
+        "python3", "rg", "sed", "ssh", "swift", "swiftc", "tar", "uv", "yarn"
+    ]
+    return commonCommands.contains(command)
 }
 
 // MARK: - CcvvCore (Rust FFI Wrapper)

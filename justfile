@@ -32,6 +32,10 @@ build-core:
 build-mac:
   cd mac && ./build.sh --skip-rust
 
+# Run focused tests for macOS inline-code marker heuristics.
+test-mac-inline-code:
+  bash mac/test-inline-code-markers.sh
+
 # Full macOS build (rebuild Rust lib first).
 build:
   cd mac && ./build.sh
