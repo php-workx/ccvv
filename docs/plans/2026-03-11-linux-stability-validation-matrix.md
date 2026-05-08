@@ -11,18 +11,18 @@ Rollout rule:
 
 | Field | Value |
 |---|---|
-| Build SHA | not yet executed against any tagged build |
-| Validation date | pending |
-| Tester | pending — must be a human on a real Linux desktop session |
-| Notes | Automated regression suite + CI gate already green at 05d8afb (2026-05-06). This matrix is the *human* half of the gate and cannot be filled from CI: it requires copying real content (browser, terminal, IDE, PDF reader, mail client) on each compositor and recording the outcome row by row. |
+| Build SHA | 8037683 — automated CI gate green at this commit (2026-05-07) |
+| Validation date | automation: 2026-05-07; human rows: pending |
+| Tester | automation: CI; human rows: pending — must be a human on a real Linux desktop session |
+| Notes | Automated regression suite (`ccvv-linux` lib + integration tests) passes at this SHA. wlroots Wayland rows are partially covered by the headless Sway harness (copy/detect/format round-trip). X11 and GNOME limited rows remain fully manual — they need real hardware sessions. This matrix is the *human* half of the gate and cannot be filled from CI: it requires copying real content (browser, terminal, IDE, PDF reader, mail client) on each compositor and recording the outcome row by row. |
 
 ## Environment Matrix
 
 | Environment | Plain text copy | Rich text copy | Code block copy | Malformed/odd HTML | Clean-now behavior | Self-write behavior | Overall pass/fail | Notes |
 |---|---|---|---|---|---|---|---|---|
-| X11 | | | | | | | | |
-| wlroots Wayland | | | | | | | | |
-| GNOME Wayland limited mode | | | | | | | | |
+| X11 | | | | | | | | Fully manual — requires live X11 session (Xvfb CI lane tracked in H1) |
+| wlroots Wayland | | | | | | | | Partially automated: headless Sway harness covers copy/detect/format round-trip. Human still needed for rich content, edge cases |
+| GNOME Wayland limited mode | | | | | | | | Fully manual — requires live GNOME session; no headless container available |
 
 ## Per-Environment Details
 

@@ -152,7 +152,7 @@ See `specs/` for the full [functional spec](specs/functional_v1.md) and [technic
 
 `ccvv-linux` is the native Linux daemon in `core/ccvv-linux`. It uses the same transform pipeline and local history store as the macOS app, but runtime behavior depends on the desktop session.
 
-Linux rollout status: `technical beta` for Linux power users.
+Linux rollout status: internal dogfood only until the manual validation matrix and soak are complete.
 
 Broad external rollout stays blocked until the Linux stability gate is complete:
 
@@ -179,8 +179,10 @@ Linux packaging artifacts live under `linux/` and the Linux release tarball curr
 
 1. `ccvv-linux`
 2. `ccvv-tray-sni`
-3. `ccvv-linux.desktop`
-4. `ccvv-linux.service`
+3. `ccvv`
+4. `ccvv-linux.desktop`
+5. `ccvv-linux.service`
+6. `icons/*.svg`
 
 The legacy `ccvv-indicator-legacy` helper remains optional and is only built when `--features xembed` is enabled.
 

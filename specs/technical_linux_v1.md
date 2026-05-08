@@ -11,7 +11,7 @@
 
 ## 1. Architecture Overview
 
-ccvv on Linux is a native Rust desktop daemon that links `ccvv-lib` directly and adds only the platform shell: clipboard integration, lifecycle management, packaging, and optional UI sidecars. Linux-specific acquisition may extract plain text from platform clipboard formats such as `text/html`, but text transformation remains in `ccvv-lib`.
+ccvv on Linux is a native Rust desktop daemon that links `ccvv-lib` directly and adds only the platform shell: clipboard integration, lifecycle management, packaging, and optional UI sidecars. Stage 1 (rich-text extraction) is platform-specific — it handles Linux clipboard formats including `text/html` with inline-code semantic hints (`<code>`, `<kbd>`, `<samp>`, `<tt>`) that are converted to backtick-wrapped plain text. Stages 2–8 (normalize, whitespace, agent-strip, structural-detection, URL, auto-wrapper, user-rules) all live in `ccvv-lib` with no Linux-specific transform logic.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -792,7 +792,7 @@ Expected crate families:
 - `zbus` or `ashpd` for portal and local D-Bus integration where needed
 - `ksni` or equivalent SNI helper for the modern tray sidecar
 - `interprocess` or equivalent for the runtime socket
-- `html5ever` or equivalent pure-Rust HTML parser
+- `html5ever` or equivalent pure-Rust HTML parser *(note: v1 ships a hand-rolled state-machine parser in `core/ccvv-linux/src/clipboard/html.rs` instead of pulling `html5ever` as a dependency; the hand-rolled parser covers the v1 extraction contract — inline-code semantic hints, `<pre>` whitespace preservation, entity decoding, and a 2 MiB cap — and adding `html5ever` is a deferred dependency-weight decision)*
 - `clap` only if the daemon exposes direct subcommands
 
 ### 11.2 Feature Flags

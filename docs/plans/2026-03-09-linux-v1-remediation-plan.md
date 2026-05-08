@@ -54,7 +54,7 @@ All commands below are scoped to `core` unless noted.
   - Detector consumes channel-specific snapshots and emits outcomes only for the same `seat_id + selection_kind`.
 
 **Step 2: Run tests**
-- `cargo test -p ccvv-linux backend`  
+- `cargo test -p ccvv-linux backend`
 Expected: FAIL (missing API and behavior).
 
 **Step 3: Implement minimal change**
@@ -63,7 +63,7 @@ Expected: FAIL (missing API and behavior).
 - Update `DetectionState` usage in `app.rs` to pass snapshot metadata consistently.
 
 **Step 4: Run checks**
-- `cargo test -p ccvv-linux`  
+- `cargo test -p ccvv-linux`
 Expected: PASS for existing tests after updates.
 
 **Step 5: Commit**
@@ -85,7 +85,7 @@ Expected: PASS for existing tests after updates.
 - Add placeholder integration test structure under `core/ccvv-linux/tests/x11_integration.rs`.
 
 **Step 2: Run tests**
-- `cargo test -p ccvv-linux x11 -- --nocapture`  
+- `cargo test -p ccvv-linux x11 -- --nocapture`
 Expected: FAIL until integration harness exists.
 
 **Step 3: Implement**
@@ -118,7 +118,7 @@ Expected: FAIL until integration harness exists.
 - Add `run` integration assertions for no infinite loop on own write.
 
 **Step 2: Run tests**
-- `cargo test -p ccvv-linux x11_integration -- --nocapture`  
+- `cargo test -p ccvv-linux x11_integration -- --nocapture`
 Expected: FAIL.
 
 **Step 3: Implement**
@@ -159,7 +159,7 @@ Expected: FAIL.
 - Populate snapshot with per-seat identifiers.
 
 **Step 4: Run checks**
-- `cargo test -p ccvv-linux wayland -- --nocapture`  
+- `cargo test -p ccvv-linux wayland -- --nocapture`
 Expected: PASS in supported compositor dev environments; document OS-limited.
 
 **Step 5: Commit**
