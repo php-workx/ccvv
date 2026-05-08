@@ -11,9 +11,13 @@ pub enum TrayIcon {
     Paused,
     Limited,
     Error,
+    Success,
 }
 
 pub fn icon_for_status(status: &StatusSnapshot) -> TrayIcon {
+    if status.show_success_flash {
+        return TrayIcon::Success;
+    }
     if status.paused {
         return TrayIcon::Paused;
     }
@@ -33,12 +37,16 @@ pub fn freedesktop_icon_name(status: &StatusSnapshot) -> &'static str {
         TrayIcon::Paused => "media-playback-pause",
         TrayIcon::Limited => "dialog-information",
         TrayIcon::Error => "dialog-warning",
+        TrayIcon::Success => "emblem-ok",
     }
 }
 
 pub fn title_for_status(status: &StatusSnapshot) -> String {
     let mode = backend_label(status);
 
+    if status.show_success_flash {
+        return format!("ccvv (clean ok, {mode})");
+    }
     if status.paused {
         return format!("ccvv (paused, {mode})");
     }
@@ -183,6 +191,23 @@ mod tests {
     }
 
     #[test]
+    fn test_icon_for_status_returns_success_when_flash_flag_set() {
+        let status = StatusSnapshot {
+            paused: false,
+            backend: BackendMode::X11,
+            capability: BackendCapability::Automatic,
+            last_clean_succeeded: true,
+            clean_now_available: true,
+            restore_available: false,
+            show_success_flash: true,
+        };
+
+        assert_eq!(icon_for_status(&status), TrayIcon::Success);
+        assert_eq!(freedesktop_icon_name(&status), "emblem-ok");
+        assert!(title_for_status(&status).contains("clean ok"));
+    }
+
+    #[test]
     fn test_status_mapping_prefers_paused_icon() {
         let status = StatusSnapshot {
             paused: true,
@@ -191,6 +216,7 @@ mod tests {
             last_clean_succeeded: true,
             clean_now_available: false,
             restore_available: false,
+            show_success_flash: false,
         };
 
         assert_eq!(icon_for_status(&status), TrayIcon::Paused);
@@ -205,6 +231,7 @@ mod tests {
             last_clean_succeeded: false,
             clean_now_available: false,
             restore_available: false,
+            show_success_flash: false,
         };
 
         assert_eq!(freedesktop_icon_name(&status), "dialog-information");
@@ -278,6 +305,7 @@ mod tests {
                     last_clean_succeeded: true,
                     clean_now_available: false,
                     restore_available: false,
+                    show_success_flash: false,
                 },
                 StatusSnapshot {
                     paused: true,
@@ -286,6 +314,7 @@ mod tests {
                     last_clean_succeeded: true,
                     clean_now_available: true,
                     restore_available: false,
+                    show_success_flash: false,
                 },
             ] {
                 stream.write_all(status.encode_line().as_bytes()).unwrap();
@@ -310,6 +339,7 @@ mod tests {
             last_clean_succeeded: true,
             clean_now_available: false,
             restore_available: false,
+            show_success_flash: false,
         };
 
         assert!(!is_action_enabled(&status, TrayAction::CleanNow));
@@ -331,6 +361,7 @@ mod tests {
                 last_clean_succeeded: true,
                 clean_now_available: false,
                 restore_available: false,
+                show_success_flash: false,
             };
 
             stream.write_all(response.encode_line().as_bytes()).unwrap();

@@ -71,6 +71,7 @@ impl ksni::Tray for StatusNotifierTray {
             TrayIcon::Paused => "media-playback-pause-symbolic".to_string(),
             TrayIcon::Limited => "dialog-warning-symbolic".to_string(),
             TrayIcon::Error => "dialog-error-symbolic".to_string(),
+            TrayIcon::Success => "emblem-ok-symbolic".to_string(),
         }
     }
 

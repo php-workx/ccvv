@@ -138,6 +138,7 @@ pub struct DaemonState {
 struct DaemonStateInner {
     status: Mutex<StatusSnapshot>,
     subscribers: Mutex<Vec<mpsc::Sender<StatusSnapshot>>>,
+    success_flash_generation: AtomicUsize,
     quitting: AtomicBool,
     clean_requested: AtomicBool,
     restore_requested: AtomicBool,
@@ -150,6 +151,7 @@ impl DaemonState {
             inner: Arc::new(DaemonStateInner {
                 status: Mutex::new(status),
                 subscribers: Mutex::new(Vec::new()),
+                success_flash_generation: AtomicUsize::new(0),
                 quitting: AtomicBool::new(false),
                 clean_requested: AtomicBool::new(false),
                 restore_requested: AtomicBool::new(false),
@@ -180,6 +182,26 @@ impl DaemonState {
 
     pub fn set_last_clean_succeeded(&self, succeeded: bool) {
         self.update_status(|status| status.last_clean_succeeded = succeeded);
+    }
+
+    pub fn flash_success(&self, duration: Duration) {
+        let generation = self
+            .inner
+            .success_flash_generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        self.update_status(|status| {
+            status.last_clean_succeeded = true;
+            status.show_success_flash = true;
+        });
+
+        let state = self.clone();
+        thread::spawn(move || {
+            thread::sleep(duration);
+            if state.inner.success_flash_generation.load(Ordering::SeqCst) == generation {
+                state.update_status(|status| status.show_success_flash = false);
+            }
+        });
     }
 
     fn subscribe(&self) -> mpsc::Receiver<StatusSnapshot> {
@@ -601,6 +623,7 @@ mod tests {
             last_clean_succeeded: true,
             clean_now_available: false,
             restore_available: false,
+            show_success_flash: false,
         });
 
         let state_for_thread = state.clone();

@@ -31,6 +31,11 @@ mod real {
 
     #[derive(Debug)]
     pub struct X11Backend {
+        inner: Option<X11ConnectedBackend>,
+    }
+
+    #[derive(Debug)]
+    struct X11ConnectedBackend {
         conn: RustConnection,
         owner_window: Window,
         clipboard_atom: Atom,
@@ -44,15 +49,23 @@ mod real {
 
     impl X11Backend {
         pub fn new() -> Self {
+            Self {
+                inner: X11ConnectedBackend::connect(),
+            }
+        }
+    }
+
+    impl X11ConnectedBackend {
+        fn connect() -> Option<Self> {
             let (conn, screen_num) = match RustConnection::connect(None) {
                 Ok(pair) => pair,
-                Err(_) => return Self::disconnected(),
+                Err(_) => return None,
             };
 
             let root = conn.setup().roots[screen_num].root;
             let owner_window = match conn.generate_id() {
                 Ok(id) => id,
-                Err(_) => return Self::disconnected(),
+                Err(_) => return None,
             };
 
             if conn
@@ -71,7 +84,7 @@ mod real {
                 )
                 .is_err()
             {
-                return Self::disconnected();
+                return None;
             }
 
             let clipboard_atom = Self::intern_atom(&conn, b"CLIPBOARD");
@@ -80,7 +93,7 @@ mod real {
             let incr_atom = Self::intern_atom(&conn, b"INCR");
 
             if clipboard_atom == 0 || utf8_string_atom == 0 || ccvv_prop_atom == 0 {
-                return Self::disconnected();
+                return None;
             }
 
             // Enable XFixes clipboard change notifications
@@ -102,7 +115,7 @@ mod real {
 
             let _ = conn.flush();
 
-            Self {
+            Some(Self {
                 conn,
                 owner_window,
                 clipboard_atom,
@@ -112,24 +125,7 @@ mod real {
                 self_serial: 0,
                 self_write_text: Arc::new(Mutex::new(None)),
                 owner: None,
-            }
-        }
-
-        fn disconnected() -> Self {
-            // Create a dummy connection that will fail on first use
-            let (conn, _screen_num) =
-                RustConnection::connect(None).expect("cannot create even dummy X11 connection");
-            Self {
-                conn,
-                owner_window: 0,
-                clipboard_atom: 0,
-                utf8_string_atom: 0,
-                ccvv_prop_atom: 0,
-                incr_atom: 0,
-                self_serial: 0,
-                self_write_text: Arc::new(Mutex::new(None)),
-                owner: None,
-            }
+            })
         }
 
         fn intern_atom(conn: &RustConnection, name: &[u8]) -> Atom {
@@ -502,15 +498,17 @@ mod real {
             )
             .map_err(|e| BackendError::Protocol(e.to_string()))?;
 
-            let clipboard_atom = X11Backend::intern_atom(&conn, b"CLIPBOARD");
-            let targets_atom = X11Backend::intern_atom(&conn, b"TARGETS");
-            let utf8_string_atom = X11Backend::intern_atom(&conn, b"UTF8_STRING");
-            let text_atom = X11Backend::intern_atom(&conn, b"TEXT");
-            let string_atom = X11Backend::intern_atom(&conn, b"STRING");
-            let text_plain_utf8_atom = X11Backend::intern_atom(&conn, b"text/plain;charset=utf-8");
-            let incr_atom = X11Backend::intern_atom(&conn, b"INCR");
-            let clipboard_manager_atom = X11Backend::intern_atom(&conn, b"CLIPBOARD_MANAGER");
-            let save_targets_atom = X11Backend::intern_atom(&conn, b"SAVE_TARGETS");
+            let clipboard_atom = X11ConnectedBackend::intern_atom(&conn, b"CLIPBOARD");
+            let targets_atom = X11ConnectedBackend::intern_atom(&conn, b"TARGETS");
+            let utf8_string_atom = X11ConnectedBackend::intern_atom(&conn, b"UTF8_STRING");
+            let text_atom = X11ConnectedBackend::intern_atom(&conn, b"TEXT");
+            let string_atom = X11ConnectedBackend::intern_atom(&conn, b"STRING");
+            let text_plain_utf8_atom =
+                X11ConnectedBackend::intern_atom(&conn, b"text/plain;charset=utf-8");
+            let incr_atom = X11ConnectedBackend::intern_atom(&conn, b"INCR");
+            let clipboard_manager_atom =
+                X11ConnectedBackend::intern_atom(&conn, b"CLIPBOARD_MANAGER");
+            let save_targets_atom = X11ConnectedBackend::intern_atom(&conn, b"SAVE_TARGETS");
 
             let has_clipboard_manager = if clipboard_manager_atom != 0 {
                 conn.get_selection_owner(clipboard_manager_atom)
@@ -854,10 +852,33 @@ mod real {
         }
 
         fn subscribe(&mut self) -> Result<BackendStream, BackendError> {
-            if !self.is_connected() {
-                return Err(BackendError::Unavailable);
-            }
+            self.inner
+                .as_mut()
+                .ok_or(BackendError::Unavailable)?
+                .subscribe()
+        }
 
+        fn read_snapshot(&mut self) -> Result<ClipboardSnapshot, BackendError> {
+            self.inner
+                .as_mut()
+                .ok_or(BackendError::Unavailable)?
+                .read_snapshot()
+        }
+
+        fn write_plain_text(&mut self, text: &str) -> Result<WriteToken, BackendError> {
+            self.inner
+                .as_mut()
+                .ok_or(BackendError::Unavailable)?
+                .write_plain_text(text)
+        }
+
+        fn source_name(&self) -> &'static str {
+            "x11"
+        }
+    }
+
+    impl X11ConnectedBackend {
+        fn subscribe(&mut self) -> Result<BackendStream, BackendError> {
             let (tx, rx) = mpsc::channel();
             let self_write_text = self.self_write_text.clone();
             let (conn, watch_window, ccvv_prop) = self.create_watch_connection()?;
@@ -903,10 +924,6 @@ mod real {
         }
 
         fn write_plain_text(&mut self, text: &str) -> Result<WriteToken, BackendError> {
-            if !self.is_connected() {
-                return Err(BackendError::Unavailable);
-            }
-
             self.self_serial += 1;
             self.ensure_selection_owner()?
                 .offer_text(text.to_string())?;
@@ -920,12 +937,6 @@ mod real {
             })
         }
 
-        fn source_name(&self) -> &'static str {
-            "x11"
-        }
-    }
-
-    impl X11Backend {
         fn create_watch_connection(&self) -> Result<(RustConnection, Window, Atom), BackendError> {
             let (conn, screen_num) =
                 RustConnection::connect(None).map_err(|e| BackendError::Protocol(e.to_string()))?;

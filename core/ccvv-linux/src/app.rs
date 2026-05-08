@@ -23,6 +23,8 @@ use crate::detection::{DetectionOutcome, DetectorState};
 use crate::single_instance::{acquire_single_instance, InstanceGuard};
 use crate::ui_protocol::{BackendCapability, BackendMode, ControlCommand, StatusSnapshot};
 
+const SUCCESS_FLASH_DURATION: Duration = Duration::from_millis(300);
+
 enum StreamDisposition {
     Keep,
     Close,
@@ -491,7 +493,7 @@ fn handle_snapshot(
         return Err(AppError::from(error));
     }
 
-    state.set_last_clean_succeeded(true);
+    state.flash_success(SUCCESS_FLASH_DURATION);
     state.set_restore_available(true);
     Ok(true)
 }
@@ -517,6 +519,7 @@ fn status_snapshot_for_backend(
     };
 
     StatusSnapshot {
+        show_success_flash: false,
         paused: false,
         backend,
         capability,
@@ -821,6 +824,7 @@ mod tests {
         assert_eq!(
             status_snapshot_for_backend(&RuntimeBackend::X11, None),
             StatusSnapshot {
+                show_success_flash: false,
                 paused: false,
                 backend: BackendMode::X11,
                 capability: BackendCapability::Automatic,
@@ -832,6 +836,7 @@ mod tests {
         assert_eq!(
             status_snapshot_for_backend(&RuntimeBackend::Wayland, None),
             StatusSnapshot {
+                show_success_flash: false,
                 paused: false,
                 backend: BackendMode::Wayland,
                 capability: BackendCapability::Automatic,
@@ -843,6 +848,7 @@ mod tests {
         assert_eq!(
             status_snapshot_for_backend(&RuntimeBackend::Limited, Some(LimitedMode::HotkeyOnly)),
             StatusSnapshot {
+                show_success_flash: false,
                 paused: false,
                 backend: BackendMode::Limited,
                 capability: BackendCapability::Limited,
@@ -854,6 +860,7 @@ mod tests {
         assert_eq!(
             status_snapshot_for_backend(&RuntimeBackend::None, None),
             StatusSnapshot {
+                show_success_flash: false,
                 paused: false,
                 backend: BackendMode::None,
                 capability: BackendCapability::DiagnosticsOnly,
@@ -865,6 +872,7 @@ mod tests {
         assert_eq!(
             status_snapshot_for_backend(&RuntimeBackend::Limited, Some(LimitedMode::CliOnly)),
             StatusSnapshot {
+                show_success_flash: false,
                 paused: false,
                 backend: BackendMode::Limited,
                 capability: BackendCapability::Limited,
@@ -928,6 +936,7 @@ mod tests {
         assert_eq!(
             status,
             StatusSnapshot {
+                show_success_flash: false,
                 paused: false,
                 backend: BackendMode::None,
                 capability: BackendCapability::DiagnosticsOnly,
@@ -1032,6 +1041,7 @@ mod tests {
         let history_path = temp_dir("history").join("history.db");
         let history = HistoryDb::open(&history_path).unwrap();
         let state = DaemonState::new(StatusSnapshot {
+            show_success_flash: false,
             paused: false,
             backend: BackendMode::None,
             capability: BackendCapability::DiagnosticsOnly,
@@ -1062,6 +1072,42 @@ mod tests {
         assert_eq!(history.recent(10).unwrap().len(), initial);
     }
 
+    #[test]
+    fn test_handle_snapshot_flashes_success_after_successful_clean() {
+        let history_path = temp_dir("history").join("history.db");
+        let history = HistoryDb::open(&history_path).unwrap();
+        let state = DaemonState::new(StatusSnapshot {
+            show_success_flash: false,
+            paused: false,
+            backend: BackendMode::X11,
+            capability: BackendCapability::Automatic,
+            last_clean_succeeded: false,
+            clean_now_available: true,
+            restore_available: false,
+        });
+
+        let resolved = ccvv_lib::config::ResolvedConfig::default();
+        let snapshot = ClipboardSnapshot {
+            seat_id: "seat0".to_string(),
+            selection_kind: SelectionKind::Clipboard,
+            acquired_plain_text: "hello    world".to_string(),
+            acquired_html: None,
+            timestamp: 1,
+            backend_serial: Some(1),
+            is_self_write: false,
+        };
+        let pipeline = Pipeline::from_resolved_config(&resolved);
+        let mut backend = RecordingBackend::default();
+
+        let result =
+            handle_snapshot(&snapshot, &pipeline, &history, &mut backend, false, &state).unwrap();
+
+        assert!(result);
+        assert!(state.snapshot().show_success_flash);
+        thread::sleep(Duration::from_millis(350));
+        assert!(!state.snapshot().show_success_flash);
+    }
+
     struct FailingBackend;
 
     impl ClipboardBackend for FailingBackend {
@@ -1082,6 +1128,35 @@ mod tests {
 
         fn source_name(&self) -> &'static str {
             "test-failing-backend"
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        written: Option<String>,
+    }
+
+    impl ClipboardBackend for RecordingBackend {
+        fn capability(&self) -> crate::ui_protocol::BackendCapability {
+            BackendCapability::Automatic
+        }
+
+        fn read_snapshot(&mut self) -> Result<ClipboardSnapshot, crate::backend::BackendError> {
+            Err(crate::backend::BackendError::Unavailable)
+        }
+
+        fn write_plain_text(
+            &mut self,
+            text: &str,
+        ) -> Result<WriteToken, crate::backend::BackendError> {
+            self.written = Some(text.to_string());
+            Ok(WriteToken {
+                backend_serial: Some(1),
+            })
+        }
+
+        fn source_name(&self) -> &'static str {
+            "test-recording-backend"
         }
     }
 

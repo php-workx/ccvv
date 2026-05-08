@@ -4,11 +4,12 @@ mod real {
     use std::io::{Read, Write};
     use std::os::fd::{AsFd, BorrowedFd};
     use std::os::unix::net::UnixStream;
-    use std::process::{Command, Stdio};
+    use std::process::{Command, ExitStatus, Stdio};
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use wait_timeout::ChildExt;
     use wayland_client::globals::{registry_queue_init, GlobalError, GlobalListContents};
     use wayland_client::protocol::wl_registry;
     use wayland_client::protocol::wl_registry::WlRegistry;
@@ -41,6 +42,13 @@ mod real {
     use crate::ui_protocol::BackendCapability;
 
     pub(super) const FALLBACK_WAYLAND_SEAT: &str = "wayland-seat-0";
+    const MAX_WAYLAND_TEXT_BYTES: usize = 1_048_576;
+    const WAYLAND_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+    struct CommandOutput {
+        status: ExitStatus,
+        stdout: Vec<u8>,
+    }
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     pub enum WaylandProtocol {
@@ -266,14 +274,12 @@ mod real {
         }
 
         fn try_read_clipboard_html() -> Option<String> {
-            let output = Command::new("wl-paste")
-                .args(["--type", "text/html"])
-                .output()
-                .ok()?;
+            let output = run_wl_paste_limited(
+                &["--type", "text/html"],
+                crate::clipboard::html::MAX_HTML_BYTES,
+            )
+            .ok()?;
             if !output.status.success() || output.stdout.is_empty() {
-                return None;
-            }
-            if output.stdout.len() > crate::clipboard::html::MAX_HTML_BYTES {
                 return None;
             }
             let html = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -283,9 +289,7 @@ mod real {
         }
 
         fn read_clipboard_text() -> Result<String, BackendError> {
-            let output = Command::new("wl-paste").output().map_err(|error| {
-                BackendError::Protocol(format!("failed to execute wl-paste: {error}"))
-            })?;
+            let output = run_wl_paste_limited(&[], MAX_WAYLAND_TEXT_BYTES)?;
 
             if !output.status.success() {
                 return Err(BackendError::Protocol(
@@ -293,7 +297,8 @@ mod real {
                 ));
             }
 
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            String::from_utf8(output.stdout)
+                .map_err(|_| BackendError::Protocol("wl-paste output was not valid UTF-8".into()))
         }
 
         fn write_clipboard_text(text: &str) -> Result<(), BackendError> {
@@ -339,6 +344,71 @@ mod real {
         fn default() -> Self {
             Self::new()
         }
+    }
+
+    fn read_limited_bytes<R: Read>(reader: R, max_bytes: usize) -> Result<Vec<u8>, BackendError> {
+        let mut limited = reader.take((max_bytes + 1) as u64);
+        let mut bytes = Vec::new();
+        limited.read_to_end(&mut bytes).map_err(BackendError::Io)?;
+        if bytes.len() > max_bytes {
+            return Err(BackendError::Protocol(format!(
+                "wayland clipboard payload exceeded {max_bytes} bytes"
+            )));
+        }
+        Ok(bytes)
+    }
+
+    fn run_wl_paste_limited(
+        args: &[&str],
+        max_bytes: usize,
+    ) -> Result<CommandOutput, BackendError> {
+        let mut child = Command::new("wl-paste")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                BackendError::Protocol(format!("failed to execute wl-paste: {error}"))
+            })?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| BackendError::Protocol("wl-paste stdout unavailable".into()))?;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(read_limited_bytes(stdout, max_bytes));
+        });
+
+        let stdout = match rx.recv_timeout(WAYLAND_READ_TIMEOUT) {
+            Ok(Ok(stdout)) => stdout,
+            Ok(Err(error)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BackendError::Protocol(
+                    "wl-paste timed out while reading clipboard data".into(),
+                ));
+            }
+        };
+
+        let status = match child
+            .wait_timeout(WAYLAND_READ_TIMEOUT)
+            .map_err(BackendError::Io)?
+        {
+            Some(status) => status,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BackendError::Protocol("wl-paste timed out".into()));
+            }
+        };
+
+        Ok(CommandOutput { status, stdout })
     }
 
     impl ClipboardBackend for WaylandBackend {
@@ -659,11 +729,8 @@ mod real {
 
             queue.roundtrip(self).ok()?;
 
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).ok()?;
-            if bytes.len() > crate::clipboard::html::MAX_HTML_BYTES {
-                return None;
-            }
+            reader.set_read_timeout(Some(WAYLAND_READ_TIMEOUT)).ok()?;
+            let bytes = read_limited_bytes(reader, crate::clipboard::html::MAX_HTML_BYTES).ok()?;
             let html = String::from_utf8(bytes).ok()?;
             crate::clipboard::html::extract_plain_text_from_html(&html)
                 .ok()
@@ -693,8 +760,10 @@ mod real {
                 ))
             })?;
 
-            let mut bytes = Vec::new();
-            reader.read_to_end(&mut bytes).map_err(BackendError::Io)?;
+            reader
+                .set_read_timeout(Some(WAYLAND_READ_TIMEOUT))
+                .map_err(BackendError::Io)?;
+            let bytes = read_limited_bytes(reader, MAX_WAYLAND_TEXT_BYTES)?;
             let text = String::from_utf8(bytes).map_err(|_| {
                 BackendError::Protocol("wayland clipboard offer was not valid UTF-8".into())
             })?;
@@ -1339,6 +1408,16 @@ mod tests {
         ]);
 
         assert_eq!(mime.as_deref(), Some("text/plain;charset=utf-8"));
+    }
+
+    #[test]
+    fn test_read_limited_bytes_rejects_oversize_payload() {
+        let payload = vec![b'x'; 6];
+
+        assert!(matches!(
+            super::real::read_limited_bytes(payload.as_slice(), 5),
+            Err(BackendError::Protocol(_))
+        ));
     }
 
     #[test]

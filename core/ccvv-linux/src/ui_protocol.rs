@@ -40,6 +40,7 @@ pub struct StatusSnapshot {
     pub last_clean_succeeded: bool,
     pub clean_now_available: bool,
     pub restore_available: bool,
+    pub show_success_flash: bool,
 }
 
 impl StatusSnapshot {
@@ -51,6 +52,7 @@ impl StatusSnapshot {
             last_clean_succeeded: true,
             clean_now_available: !matches!(capability, BackendCapability::DiagnosticsOnly),
             restore_available: false,
+            show_success_flash: false,
         }
     }
 
@@ -133,13 +135,14 @@ impl BackendCapability {
 impl StatusSnapshot {
     pub fn encode_line(&self) -> String {
         format!(
-            "paused={};backend={};capability={};last_clean_succeeded={};clean_now_available={};restore_available={}",
+            "paused={};backend={};capability={};last_clean_succeeded={};clean_now_available={};restore_available={};show_success_flash={}",
             self.paused,
             self.backend.as_str(),
             self.capability.as_str(),
             self.last_clean_succeeded,
             self.clean_now_available,
-            self.restore_available
+            self.restore_available,
+            self.show_success_flash
         )
     }
 
@@ -150,6 +153,7 @@ impl StatusSnapshot {
         let mut last_clean_succeeded = None;
         let mut clean_now_available = None;
         let mut restore_available = None;
+        let mut show_success_flash = None;
 
         for part in value.split(';') {
             let (key, value) = part.split_once('=')?;
@@ -160,6 +164,7 @@ impl StatusSnapshot {
                 "last_clean_succeeded" => last_clean_succeeded = Some(matches!(value, "true")),
                 "clean_now_available" => clean_now_available = Some(matches!(value, "true")),
                 "restore_available" => restore_available = Some(matches!(value, "true")),
+                "show_success_flash" => show_success_flash = Some(matches!(value, "true")),
                 _ => {} // ignore unknown keys for forward compatibility
             }
         }
@@ -174,6 +179,7 @@ impl StatusSnapshot {
             clean_now_available: clean_now_available
                 .unwrap_or(!matches!(capability, BackendCapability::DiagnosticsOnly)),
             restore_available: restore_available.unwrap_or(false),
+            show_success_flash: show_success_flash.unwrap_or(false),
         })
     }
 }
@@ -201,6 +207,7 @@ mod tests {
             last_clean_succeeded: true,
             clean_now_available: false,
             restore_available: false,
+            show_success_flash: false,
         };
 
         let encoded = snapshot.encode_line();
@@ -217,6 +224,7 @@ mod tests {
             last_clean_succeeded: false,
             clean_now_available: false,
             restore_available: false,
+            show_success_flash: true,
         };
 
         assert_eq!(
