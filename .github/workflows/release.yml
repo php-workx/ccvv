@@ -128,7 +128,8 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           ASSET_URL="https://github.com/php-workx/ccvv/releases/download/v${VERSION}/ccvv-${VERSION}.zip"
-          curl --head --fail --silent --show-error --location "$ASSET_URL" > /dev/null
+          curl --head --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' "$ASSET_URL" > /dev/null
           echo "Asset verified: $ASSET_URL"
 
       - name: Update Homebrew tap
