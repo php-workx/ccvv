@@ -15,8 +15,7 @@ You copy text from a terminal, a PDF, or an AI agent. You paste it. It's a disas
 
 **Homebrew (recommended):**
 ```bash
-brew tap php-workx/ccvv
-brew install --cask ccvv
+brew install --cask php-workx/tap/ccvv
 ```
 
 **From source:**
