@@ -128,7 +128,8 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           ASSET_URL="https://github.com/php-workx/ccvv/releases/download/v${VERSION}/ccvv-${VERSION}.zip"
-          curl --head --fail --silent --show-error --location "$ASSET_URL" > /dev/null
+          curl --head --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' "$ASSET_URL" > /dev/null
           echo "Asset verified: $ASSET_URL"
 
       - name: Update Homebrew tap
@@ -139,15 +140,15 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           SHA="${{ steps.sha.outputs.sha256 }}"
 
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/php-workx/homebrew-ccvv.git" \
-            "$RUNNER_TEMP/homebrew-ccvv"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/php-workx/homebrew-tap.git" \
+            "$RUNNER_TEMP/homebrew-tap"
 
-          mkdir -p "$RUNNER_TEMP/homebrew-ccvv/Casks"
+          mkdir -p "$RUNNER_TEMP/homebrew-tap/Casks"
 
           sed -e "s/@@VERSION@@/$VERSION/" -e "s/@@SHA256@@/$SHA/" \
-            mac/ccvv.rb.template > "$RUNNER_TEMP/homebrew-ccvv/Casks/ccvv.rb"
+            mac/ccvv.rb.template > "$RUNNER_TEMP/homebrew-tap/Casks/ccvv.rb"
 
-          cd "$RUNNER_TEMP/homebrew-ccvv"
+          cd "$RUNNER_TEMP/homebrew-tap"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/ccvv.rb

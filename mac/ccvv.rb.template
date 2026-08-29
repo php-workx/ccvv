@@ -7,7 +7,7 @@ cask "ccvv" do
   desc "Clean up clipboard text while preserving markdown structure"
   homepage "https://github.com/php-workx/ccvv"
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "ccvv.app"
   binary "ccvv.app/Contents/MacOS/ccvv-cli", target: "ccvv"
